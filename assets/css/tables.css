@@ -1,0 +1,96 @@
+/* Shared table alignment and layout tweaks for consistency across pages */
+
+/* Apply to all Bootstrap tables */
+.table {
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+.table th,
+.table td {
+  vertical-align: middle;
+}
+
+.table thead th {
+  white-space: nowrap;
+}
+
+.table th:last-child,
+.table td:last-child {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.serial-col {
+  width: 56px;
+  text-align: center;
+}
+
+.table.table-sm th,
+.table.table-sm td {
+  padding: 0.6rem 0.85rem;
+}
+
+.filters-card {
+  border-radius: var(--df-card-radius, .75rem);
+  border: 1px solid var(--app-border, #dee2e6);
+  background-color: var(--app-surface, #fff);
+  box-shadow: var(--df-shadow-sm, 0 10px 24px -20px rgba(2, 6, 23, 0.22));
+}
+
+.filters-card .form-label {
+  font-size: .78rem;
+  letter-spacing: .02em;
+  color: var(--app-muted, #6c757d);
+}
+
+.filters-card .form-control,
+.filters-card .form-select {
+  font-size: .875rem;
+}
+
+.filters-card .btn {
+  font-size: .875rem;
+}
+
+.table-responsive {
+  border-radius: .5rem;
+  border: 1px solid var(--app-border, #dee2e6);
+  background-color: var(--app-surface, #fff);
+  padding: 14px;
+}
+
+.table thead th.sticky-header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background-color: var(--app-bg, #f8f9fa);
+}
+
+.table-responsive .table thead th{
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--app-surface, #fff);
+  box-shadow: inset 0 -1px 0 var(--app-border, #dee2e6);
+}
+
+.table-responsive .table tbody tr{
+  transition: background-color .12s ease;
+}
+
+.table-responsive .table tbody tr:nth-child(odd){
+  background: rgba(15,23,42,.015);
+}
+
+[data-bs-theme="dark"] .table-responsive .table tbody tr:nth-child(odd){
+  background: rgba(255,255,255,.03);
+}
+
+.table-responsive .table tbody tr:hover{
+  background: rgba(79,70,229,.06);
+}
+
+[data-bs-theme="dark"] .table-responsive .table tbody tr:hover{
+  background: rgba(99,102,241,.14);
+}

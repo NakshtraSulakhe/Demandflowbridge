@@ -1,0 +1,180 @@
+<?php
+
+return [
+    'dashboard' => [
+        'scope' => 'any',
+        'permissions_any' => ['dashboard.admin','dashboard.operations','dashboard.qa','dashboard.sales','dashboard.client','dashboard.vendor','dashboard.marketing','dashboard.access','dbms.access'],
+        'items' => [],
+    ],
+    'analytics' => [
+        'scope' => 'internal',
+        'permissions_any' => ['admin.analytics'],
+        'items' => [
+            'campaigns' => ['permissions_any' => ['admin.analytics','admin.analytics.campaigns.page']],
+            'agents' => ['permissions_any' => ['admin.analytics','admin.analytics.agents.page']],
+            'sales' => ['permissions_any' => ['admin.analytics','admin.analytics.sales.page']],
+            'dbms' => ['permissions_any' => ['admin.analytics','admin.analytics.dbms.page']],
+        ],
+    ],
+    'vendor_portal' => [
+        'scope' => 'vendor',
+        'permissions_any' => ['vendors.access','campaigns.view','leads.view','leads.entry','leads.my','revenue.access'],
+        'items' => [
+            'add_lead' => ['permissions_any' => ['leads.entry','leads.entry.page']],
+            'my_leads' => ['permissions_any' => ['leads.my','leads.my.page']],
+            'campaigns' => ['permissions_any' => ['campaigns.view','vendors.campaigns.page']],
+            'leads' => ['permissions_any' => ['leads.view','vendors.leads.page']],
+            'revenue' => ['permissions_any' => ['revenue.access','vendors.revenue.page']],
+            'billing' => ['permissions_any' => ['vendors.access','vendors.billing.page']],
+        ],
+    ],
+    'client_portal' => [
+        'scope' => 'client',
+        'permissions_any' => ['dashboard.client','dashboard.client.page','clients.access','campaigns.view','leads.view'],
+        'items' => [
+            'dashboard' => ['permissions_any' => ['dashboard.client','dashboard.client.page']],
+            'campaigns' => ['permissions_any' => ['campaigns.view','clients.campaigns.page']],
+            'leads' => ['permissions_any' => ['leads.view','clients.leads.page']],
+            'users' => ['permissions_any' => ['clients.users.manage','clients.users.page']],
+            'billing' => ['permissions_any' => ['clients.access','clients.billing.page']],
+        ],
+    ],
+    'sales' => [
+        'scope' => 'internal',
+        'permissions_any' => ['sales.access','sales.dashboard.page','sales.targets.page','sales.leads.page','sales.create.page','sales.accounts.page','sales.map.page'],
+        'items' => [
+            'dashboard' => ['permissions_any' => ['sales.dashboard.page','sales.access']],
+            'targets' => ['permissions_any' => ['sales.targets.page','sales.access']],
+            'prospects' => ['permissions_any' => ['sales.leads.page','sales.access']],
+            'create' => ['permissions_any' => ['sales.create.page','sales.access']],
+            'accounts' => ['permissions_any' => ['sales.accounts.page','sales.access']],
+            'map' => ['permissions_any' => ['sales.map.page','sales.access']],
+        ],
+    ],
+    'directories' => [
+        'scope' => 'internal',
+        'permissions_any' => ['clients.access','vendors.access','clients.directory.page','vendors.directory.page'],
+        'items' => [
+            'clients' => ['permissions_any' => ['clients.directory.page','clients.access']],
+            'vendors' => ['permissions_any' => ['vendors.directory.page','vendors.access']],
+        ],
+    ],
+    'campaigns' => [
+        'scope' => 'internal',
+        'permissions_any' => ['campaigns.view','campaigns.manage','forms.manage','campaigns.dashboard.page','campaigns.list.page','campaigns.create.page','campaigns.allocation.page','campaigns.files.page','forms.manage.page'],
+        'items' => [
+            'dashboard' => ['permissions_any' => ['campaigns.dashboard.page','campaigns.dashboard']],
+            'list' => ['permissions_any' => ['campaigns.list.page','campaigns.view','campaigns.manage']],
+            'create' => ['permissions_any' => ['campaigns.create.page','campaigns.manage']],
+            'allocation' => ['permissions_any' => ['campaigns.allocation.page','campaigns.manage']],
+            'files' => ['permissions_any' => ['campaigns.files.page','campaigns.manage']],
+            'forms' => ['permissions_any' => ['forms.manage.page','forms.manage']],
+        ],
+    ],
+    'leads' => [
+        'scope' => 'internal',
+        'permissions_any' => ['leads.view','leads.manage','leads.entry','leads.my','leads.export','leads.entry.page','leads.my.page','leads.marketing.page','leads.email.page','leads.bulk.page','leads.list.page','leads.vendor.page'],
+        'items' => [
+            'entry' => ['permissions_any' => ['leads.entry.page','leads.entry']],
+            'my' => ['permissions_any' => ['leads.my.page','leads.my']],
+            'marketing' => ['permissions_any' => ['leads.marketing.page','leads.marketing']],
+            'email' => ['permissions_any' => ['leads.email.page','leads.email']],
+            'bulk' => ['permissions_any' => ['leads.bulk.page','leads.bulk_upload']],
+            'manage' => ['permissions_any' => ['leads.list.page','leads.manage']],
+            'vendor' => ['permissions_any' => ['leads.vendor.page']],
+            'export' => ['permissions_any' => ['leads.export.page','leads.export']],
+        ],
+    ],
+    'tasks' => [
+        'scope' => 'internal',
+        'permissions_any' => ['tasks.access','tasks.create','tasks.manage','tasks.reports','tasks.dashboard.page','tasks.create.page','tasks.reports.page'],
+        'items' => [
+            'dashboard' => ['permissions_any' => ['tasks.dashboard.page','tasks.access']],
+            'create' => ['permissions_any' => ['tasks.create.page','tasks.create']],
+            'reports' => ['permissions_any' => ['tasks.reports.page','tasks.reports']],
+        ],
+    ],
+    'performance' => [
+        'scope' => 'internal',
+        'permissions_any' => ['funneltrack360.access','funneltrack360.team','funneltrack360.admin','funneltrack360.targets','funneltrack360.reports','funneltrack360.dashboard.page','funneltrack360.detail.page','funneltrack360.team.page','funneltrack360.reports.page','funneltrack360.admin.page'],
+        'items' => [
+            'dashboard' => ['permissions_any' => ['funneltrack360.dashboard.page','funneltrack360.access']],
+            'detail' => ['permissions_any' => ['funneltrack360.detail.page','funneltrack360.access','funneltrack360.team','funneltrack360.reports','funneltrack360.admin']],
+            'team' => ['permissions_any' => ['funneltrack360.team.page','funneltrack360.team']],
+            'reports' => ['permissions_any' => ['funneltrack360.reports.page','funneltrack360.reports']],
+            'admin' => ['permissions_any' => ['funneltrack360.admin.page','funneltrack360.admin','funneltrack360.targets']],
+        ],
+    ],
+    'dbms' => [
+        'scope' => 'internal',
+        'permissions_any' => ['dbms.access','dbms.upload','dbms.explorer','dbms.assignment','dbms.my','dbms.research','dbms.cdqa','dbms.view','dbms.export','dbms.reports','dbms.dashboard.page'],
+        'items' => [
+            'dashboard' => ['permissions_any' => ['dbms.dashboard.page','dbms.access']],
+            'upload' => ['permissions_any' => ['dbms.upload.page','dbms.upload']],
+            'explorer' => ['permissions_any' => ['dbms.explorer.page','dbms.explorer']],
+            'assignments' => ['permissions_any' => ['dbms.assignments.page','dbms.assignment']],
+            'my' => ['permissions_any' => ['dbms.my.page','dbms.my']],
+            'research' => ['permissions_any' => ['dbms.research.page','dbms.research']],
+            'cdqa' => ['permissions_any' => ['dbms.cdqa.page','dbms.cdqa']],
+            'batches' => ['permissions_any' => ['dbms.batch.page','dbms.reports']],
+        ],
+    ],
+    'qa' => [
+        'scope' => 'internal',
+        'permissions_any' => ['qa.access','qa.assignments','qa.dashboard.page','qa.audit.page','qa.request.page','qa.assignments.page'],
+        'items' => [
+            'dashboard' => ['permissions_any' => ['qa.dashboard.page','qa.access']],
+            'audit' => ['permissions_any' => ['qa.audit.page','qa.access']],
+            'request' => ['permissions_any' => ['qa.request.page','qa.access']],
+            'assignments' => ['permissions_any' => ['qa.assignments.page','qa.assignments']],
+            'export' => ['permissions_any' => ['leads.export.page','leads.export']],
+        ],
+    ],
+    'hr' => [
+        'scope' => 'internal',
+        'permissions_any' => ['hr.access','hr.attendance','hr.leaves','hr.payslips','hr.attendance_admin','hr.shifts','hr.payroll','hr.break_automation','hr.dashboard.page','hr.attendance.page','hr.leaves.page','hr.payslips.page','hr.attendance_admin.page','hr.shifts.page','hr.salary_setup.page','hr.bonus_loans.page','hr.payroll.page','hr.break_automation.page'],
+        'items' => [
+            'dashboard' => ['permissions_any' => ['hr.dashboard.page','hr.access']],
+            'attendance' => ['permissions_any' => ['hr.attendance.page','hr.attendance','hr.access']],
+            'leaves' => ['permissions_any' => ['hr.leaves.page','hr.leaves','hr.access']],
+            'payslips' => ['permissions_any' => ['hr.payslips.page','hr.payslips','hr.access']],
+            'attendance_admin' => ['permissions_any' => ['hr.attendance_admin.page','hr.attendance_admin']],
+            'shifts' => ['permissions_any' => ['hr.shifts.page','hr.shifts']],
+            'salary_setup' => ['permissions_any' => ['hr.salary_setup.page','hr.payroll']],
+            'bonus_loans' => ['permissions_any' => ['hr.bonus_loans.page','hr.payroll']],
+            'payroll' => ['permissions_any' => ['hr.payroll.page','hr.payroll']],
+            'break_automation' => ['permissions_any' => ['hr.break_automation','hr.break_automation.page']],
+        ],
+    ],
+    'revenue' => [
+        'scope' => 'internal',
+        'permissions_any' => ['revenue.dashboard.page','revenue.campaign.page','revenue.expenses.page','revenue.invoices.page','revenue.billto.page','revenue.access'],
+        'items' => [
+            'dashboard' => ['permissions_any' => ['revenue.dashboard.page','revenue.access']],
+            'campaign' => ['permissions_any' => ['revenue.campaign.page','revenue.access']],
+            'expenses' => ['permissions_any' => ['revenue.expenses.page','revenue.access']],
+            'invoices' => ['permissions_any' => ['revenue.invoices.page','revenue.access']],
+            'billto' => ['permissions_any' => ['revenue.billto.page','revenue.access']],
+        ],
+    ],
+    'communication' => [
+        'scope' => 'internal',
+        'permissions_any' => ['chat.access'],
+        'items' => [
+            'chat' => ['permissions_any' => ['chat.page','chat.access']],
+        ],
+    ],
+    'system' => [
+        'scope' => 'internal',
+        'permissions_any' => ['users.internal.manage','clients.users.manage','vendors.users.manage','admin.analytics','admin.access_management.page','admin.team_management.page','admin.settings.page','admin.db_diagnostics.page'],
+        'items' => [
+            'internal_users' => ['permissions_any' => ['users.manage.page','users.internal.manage']],
+            'teams' => ['permissions_any' => ['admin.team_management.page','admin.settings']],
+            'settings' => ['permissions_any' => ['admin.settings.page','admin.settings']],
+            'vendor_users' => ['permissions_any' => ['vendors.users.page','vendors.users.manage']],
+            'client_users' => ['permissions_any' => ['clients.users.page','clients.users.manage']],
+            'diagnostics' => ['permissions_any' => ['admin.db_diagnostics.page','admin.settings']],
+            'access_management' => ['permissions_any' => ['admin.access_management.page','admin.settings']],
+        ],
+    ],
+];

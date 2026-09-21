@@ -1,0 +1,43 @@
+# User uploaded/runtime files
+uploads/*
+uploads/**
+!uploads/.gitkeep
+!uploads/**/.gitkeep
+
+# Storage
+storage/recordings/*
+storage/tmp/*
+
+# Temporary files
+tmp/*
+*.tmp
+
+# Audio / recordings
+*.wav
+*.mp3
+*.m4a
+
+# Reports & Spreadsheets
+*.xls
+*.xlsx
+
+# Database dumps/backups
+*.sql
+*.zip
+*.rar
+*.7z
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+logs/
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

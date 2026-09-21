@@ -1,0 +1,133 @@
+RewriteEngine On
+DirectoryIndex index.php
+
+Options -Indexes -MultiViews
+
+<IfModule mod_core.c>
+LimitRequestBody 0
+</IfModule>
+
+RewriteRule ^(config|includes|storage|tmp|docs|tools)/ - [F,L]
+RewriteRule ^uploads/.*\.(php|phtml|phar)(?:/|$) - [F,L,NC]
+
+<IfModule mod_php.c>
+php_value upload_max_filesize 2048M
+php_value post_max_size 2048M
+php_value max_execution_time 1800
+php_value max_input_time 1800
+php_value memory_limit 1024M
+</IfModule>
+
+<IfModule mod_headers.c>
+Header set X-Content-Type-Options "nosniff"
+Header set X-Frame-Options "SAMEORIGIN"
+Header set X-XSS-Protection "1; mode=block"
+</IfModule>
+
+<IfModule mod_authz_core.c>
+<FilesMatch "^\.">
+Require all denied
+</FilesMatch>
+</IfModule>
+
+RewriteCond %{REQUEST_URI} !^/api/ [NC]
+RewriteCond %{REQUEST_URI} !^/[^/]+/api/ [NC]
+RewriteCond %{THE_REQUEST} \s+(/[^\s?]+)\.php[?\s] [NC]
+RewriteCond %{REQUEST_METHOD} !POST
+RewriteCond %{REQUEST_URI} \.php$ [NC]
+RewriteCond %{REQUEST_FILENAME} -f
+RewriteRule ^ %1 [R=301,L]
+
+RewriteRule ^modules/admin/?$ modules/admin/settings [R=302,L]
+RewriteRule ^modules/users/?$ modules/users/manage-users [R=302,L]
+RewriteCond %{REQUEST_URI} ^/([^/]+)(?:/|$) [NC]
+RewriteRule ^modules/dashboard/?$ /%1/ [R=302,L]
+RewriteRule ^modules/dashboard/?$ / [R=302,L]
+
+RewriteRule ^modules/auth/?$ modules/auth/login.php [L,QSA]
+RewriteRule ^modules/chat/?$ modules/chat/chat.php [L,QSA]
+RewriteRule ^modules/clients/?$ modules/clients/clients.php [L,QSA]
+RewriteRule ^modules/forms/?$ modules/forms/forms-manage.php [L,QSA]
+RewriteRule ^modules/hr/?$ modules/hr/hr-dashboard.php [L,QSA]
+RewriteRule ^modules/hr/break-automation/?$ modules/hr/break-automation.php [L,QSA]
+RewriteRule ^modules/hr/break-countdown-ajax/?$ modules/hr/break-countdown-ajax.php [L,QSA]
+RewriteRule ^modules/hr/break-override-ajax/?$ modules/hr/break-override-ajax.php [L,QSA]
+RewriteRule ^modules/notifications/?$ modules/notifications/notifications.php [L,QSA]
+RewriteRule ^modules/productivity/?$ modules/performance/dashboard.php [L,QSA]
+RewriteRule ^modules/revenue/?$ modules/revenue/revenue.php [L,QSA]
+RewriteRule ^modules/sales/?$ modules/sales/dashboard.php [L,QSA]
+RewriteRule ^modules/tasks/?$ modules/tasks/tasks.php [L,QSA]
+RewriteRule ^modules/dbms/?$ modules/dbms/dashboard.php [L,QSA]
+RewriteRule ^modules/performance/?$ modules/performance/dashboard.php [L,QSA]
+RewriteRule ^modules/funneltrack360/?$ modules/performance/dashboard.php [L,QSA]
+RewriteRule ^modules/vendors/?$ modules/vendors/vendors.php [L,QSA]
+
+RewriteRule ^modules/tasks/create/?$ modules/tasks/task-create.php [L,QSA]
+RewriteRule ^modules/tasks/view/?$ modules/tasks/task-view.php [L,QSA]
+RewriteRule ^modules/tasks/reports/?$ modules/tasks/reports.php [L,QSA]
+RewriteRule ^modules/tasks/api/?$ modules/tasks/api.php [L,QSA]
+RewriteRule ^modules/tasks/deadline-run/?$ modules/tasks/deadline-run.php [L,QSA]
+
+RewriteRule ^modules/files/download/?$ modules/files/download.php [L,QSA]
+
+RewriteRule ^modules/dbms/dashboard/?$ modules/dbms/dashboard.php [L,QSA]
+RewriteRule ^modules/dbms/upload/?$ modules/dbms/upload.php [L,QSA]
+RewriteRule ^modules/dbms/explorer/?$ modules/dbms/explorer.php [L,QSA]
+RewriteRule ^modules/dbms/assignments/?$ modules/dbms/assignments.php [L,QSA]
+RewriteRule ^modules/dbms/my/?$ modules/dbms/my.php [L,QSA]
+RewriteRule ^modules/dbms/research/?$ modules/dbms/research.php [L,QSA]
+RewriteRule ^modules/dbms/cdqa/?$ modules/dbms/cdqa.php [L,QSA]
+RewriteRule ^modules/dbms/view/?$ modules/dbms/view.php [L,QSA]
+RewriteRule ^modules/dbms/batch/?$ modules/dbms/batch.php [L,QSA]
+RewriteRule ^modules/dbms/export/?$ modules/dbms/export.php [L,QSA]
+
+RewriteRule ^modules/performance/team/?$ modules/performance/team.php [L,QSA]
+RewriteRule ^modules/performance/admin/?$ modules/performance/admin.php [L,QSA]
+RewriteRule ^modules/performance/reports/?$ modules/performance/reports.php [L,QSA]
+
+RewriteRule ^modules/funneltrack360/team/?$ modules/performance/team.php [L,QSA]
+RewriteRule ^modules/funneltrack360/admin/?$ modules/performance/admin.php [L,QSA]
+RewriteRule ^modules/funneltrack360/reports/?$ modules/performance/reports.php [L,QSA]
+
+RewriteRule ^modules/leads/?$ modules/leads/leads-edit.php [L,QSA]
+RewriteRule ^modules/leads/list/?$ modules/leads/leads-edit.php [L,QSA]
+RewriteRule ^modules/leads/export/?$ modules/leads/export.php [L,QSA]
+RewriteRule ^modules/leads/view/?$ modules/leads/lead-details.php [L,QSA]
+RewriteRule ^modules/leads/details/?$ modules/leads/get_lead_details.php [L,QSA]
+RewriteRule ^modules/leads/entry/?$ modules/leads/agent.php [L,QSA]
+RewriteRule ^modules/leads/my/?$ modules/leads/my-leads.php [L,QSA]
+RewriteRule ^modules/leads/bulk/?$ modules/leads/bulk-upload.php [L,QSA]
+RewriteRule ^modules/leads/marketing/?$ modules/leads/form-filler.php [L,QSA]
+RewriteRule ^modules/leads/email/?$ modules/leads/email-leads.php [L,QSA]
+RewriteRule ^modules/leads/purge/?$ modules/leads/leads-purge.php [L,QSA]
+RewriteRule ^modules/leads/tracking/?$ modules/leads/lead-tracking.php [L,QSA]
+RewriteRule ^modules/leads/vendors/?$ modules/leads/leads-edit.php?mode=vendor [L,QSA]
+
+RewriteRule ^modules/qa/?$ modules/qa/dashboard.php [L,QSA]
+RewriteRule ^modules/qa/dashboard/?$ modules/qa/dashboard.php [L,QSA]
+RewriteRule ^modules/qa/audit/?$ modules/qa/audit.php [L,QSA]
+RewriteRule ^modules/qa/action/?$ modules/qa/action.php [L,QSA]
+RewriteRule ^modules/qa/assignments/?$ modules/qa/assignments.php [L,QSA]
+RewriteRule ^modules/qa/request/?$ modules/qa/request-assignment.php [L,QSA]
+
+RewriteRule ^modules/campaigns/?$ modules/campaigns/campaigns-manage.php [L,QSA]
+RewriteRule ^modules/campaigns/list/?$ modules/campaigns/campaigns-manage.php [L,QSA]
+RewriteRule ^modules/campaigns/create/?$ modules/campaigns/campaign-create.php [L,QSA]
+RewriteRule ^modules/campaigns/edit/?$ modules/campaigns/campaign-edit.php [L,QSA]
+RewriteRule ^modules/campaigns/view/?$ modules/campaigns/campaign-details.php [L,QSA]
+RewriteRule ^modules/campaigns/allocation/?$ modules/campaigns/campaign-allocation.php [L,QSA]
+RewriteRule ^modules/campaigns/files/?$ modules/campaigns/campaign-delivery.php [L,QSA]
+RewriteRule ^modules/campaigns/leads/?$ modules/campaigns/campaign-leads.php [L,QSA]
+RewriteRule ^modules/campaigns/dashboard/?$ modules/campaigns/campaign-dashboard.php [L,QSA]
+RewriteRule ^modules/campaigns/export/?$ modules/campaigns/campaigns-export.php [L,QSA]
+RewriteRule ^modules/campaigns/delete/?$ modules/campaigns/campaign-delete.php [L,QSA]
+RewriteRule ^modules/campaigns/assign-sdr/?$ modules/campaigns/campaign-assign-sdr.php [L,QSA]
+RewriteRule ^modules/campaigns/options-source/?$ modules/campaigns/campaign-form-options-source.php [L,QSA]
+
+RewriteCond %{REQUEST_FILENAME} -f
+RewriteRule ^ - [L]
+
+RewriteCond %{REQUEST_URI} !^/api/ [NC]
+RewriteCond %{REQUEST_URI} !^/[^/]+/api/ [NC]
+RewriteCond %{DOCUMENT_ROOT}%{REQUEST_URI}.php -f
+RewriteRule ^(.+?)/?$ $1.php [L]
