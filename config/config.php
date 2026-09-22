@@ -14,7 +14,7 @@ define('DB_PASS', '');
 
 // Application Configuration
 define('APP_NAME', 'DemandFlow Bridge');
-define('APP_URL', 'http://localhost/demandflowbridge'); // Base URL without trailing slash
+define('APP_URL', 'https://app.demandflowbridge.com'); // Base URL without trailing slash
 
 // Production Hardening
 define('APP_DEBUG', true); // Set to true for development, false for production
