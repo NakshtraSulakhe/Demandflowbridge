@@ -737,6 +737,176 @@ function getSlide5Data(mysqli $conn, string $date, int $intervalMinutes = 10, ?s
     ];
 }
 
+/**
+ * Live Recognition & Announcements: Top Leads Scored, Birthdays, Work Anniversaries
+ */
+function getRecognitionData(mysqli $conn, string $date): array {
+    $todayMd = substr($date, 5, 5);
+
+    // 1. Top Leads Scored (Daily from leads created on $date, fallback to top overall scorers)
+    $dailyTopQuery = "
+        SELECT 
+            u.id AS user_id,
+            u.full_name,
+            u.role,
+            u.department,
+            u.profile_pic,
+            COUNT(l.id) AS generated_leads,
+            SUM(CASE WHEN l.qa_status = 'Qualified' THEN 1 ELSE 0 END) AS qualified_leads
+        FROM users u
+        JOIN leads l ON l.agent_id = u.id
+        WHERE DATE(l.created_at) = '{$date}' AND u.is_active = 1
+        GROUP BY u.id, u.full_name
+        ORDER BY qualified_leads DESC, generated_leads DESC
+        LIMIT 6
+    ";
+    $rs = $conn->query($dailyTopQuery);
+    $topDaily = $rs ? $rs->fetch_all(MYSQLI_ASSOC) : [];
+
+    $overallQuery = "
+        SELECT 
+            u.id AS user_id,
+            u.full_name,
+            u.role,
+            u.department,
+            u.profile_pic,
+            COUNT(l.id) AS generated_leads,
+            SUM(CASE WHEN l.qa_status = 'Qualified' THEN 1 ELSE 0 END) AS qualified_leads
+        FROM users u
+        JOIN leads l ON l.agent_id = u.id
+        WHERE u.is_active = 1
+        GROUP BY u.id, u.full_name
+        ORDER BY qualified_leads DESC, generated_leads DESC
+        LIMIT 6
+    ";
+    $rsAll = $conn->query($overallQuery);
+    $topOverall = $rsAll ? $rsAll->fetch_all(MYSQLI_ASSOC) : [];
+
+    $topScorers = (!empty($topDaily) && (int)($topDaily[0]['qualified_leads'] ?? 0) > 0) ? $topDaily : $topOverall;
+
+    // 2. Birthdays (Active employees celebrating birthday today or recently/upcoming)
+    $bdayQuery = "
+        SELECT 
+            u.id AS user_id,
+            u.full_name,
+            u.role,
+            u.department,
+            u.profile_pic,
+            COALESCE(upd.date_of_birth, u.date_of_birth) AS date_of_birth
+        FROM users u
+        LEFT JOIN user_personal_details upd ON upd.user_id = u.id
+        WHERE u.is_active = 1 
+          AND (upd.date_of_birth IS NOT NULL OR u.date_of_birth IS NOT NULL)
+        ORDER BY 
+            (DATE_FORMAT(COALESCE(upd.date_of_birth, u.date_of_birth), '%m-%d') = '{$todayMd}') DESC,
+            DATE_FORMAT(COALESCE(upd.date_of_birth, u.date_of_birth), '%m-%d') ASC
+        LIMIT 6
+    ";
+    $rsBday = $conn->query($bdayQuery);
+    $birthdays = $rsBday ? $rsBday->fetch_all(MYSQLI_ASSOC) : [];
+
+    // 3. Work Anniversaries (Active employees celebrating work anniversary)
+    $anniQuery = "
+        SELECT 
+            u.id AS user_id,
+            u.full_name,
+            u.role,
+            u.department,
+            u.profile_pic,
+            u.date_of_joining,
+            TIMESTAMPDIFF(YEAR, u.date_of_joining, '{$date}') AS years_completed
+        FROM users u
+        WHERE u.is_active = 1 
+          AND u.date_of_joining IS NOT NULL
+          AND u.date_of_joining <= '{$date}'
+        ORDER BY 
+            (DATE_FORMAT(u.date_of_joining, '%m-%d') = '{$todayMd}') DESC,
+            years_completed DESC
+        LIMIT 6
+    ";
+    $rsAnni = $conn->query($anniQuery);
+    $anniversaries = $rsAnni ? $rsAnni->fetch_all(MYSQLI_ASSOC) : [];
+
+    // Format unified ticker items for smooth auto-scroller display
+    $tickerItems = [];
+    $rank = 1;
+    foreach ($topScorers as $agent) {
+        $qual = (int)($agent['qualified_leads'] ?? 0);
+        $gen = (int)($agent['generated_leads'] ?? 0);
+        $medal = $rank === 1 ? '🥇' : ($rank === 2 ? '🥈' : ($rank === 3 ? '🥉' : '⭐'));
+        $tickerItems[] = [
+            'id' => 'lead-rank-' . $agent['user_id'],
+            'type' => 'top_lead_scorer',
+            'icon' => 'trophy',
+            'badge' => "{$medal} Rank #{$rank} Top Scorer",
+            'eyebrow' => 'Top Leads Scored',
+            'title' => $agent['full_name'],
+            'subtitle' => "{$qual} Qualified Leads • {$gen} Total Generated",
+            'message' => "High productivity milestone & quality qualification turnaround.",
+            'accent' => 'amber',
+            'user_id' => (int)$agent['user_id'],
+            'profile_pic' => $agent['profile_pic'] ?? '',
+            'score' => $qual,
+            'rank' => $rank
+        ];
+        $rank++;
+    }
+
+    foreach ($birthdays as $bday) {
+        $dob = $bday['date_of_birth'] ?? '';
+        $isToday = substr($dob, 5, 5) === $todayMd;
+        $badgeText = $isToday ? '🎂 Birthday Today!' : '🎈 Birthday Celebration';
+        $tickerItems[] = [
+            'id' => 'bday-' . $bday['user_id'],
+            'type' => 'birthday',
+            'icon' => 'cake',
+            'badge' => $badgeText,
+            'eyebrow' => 'Birthday Celebration',
+            'title' => 'Happy Birthday, ' . $bday['full_name'] . '!',
+            'subtitle' => ($bday['department'] ? $bday['department'] . ' Team' : 'Team Member'),
+            'message' => 'Wishing you a joyful celebration and a year full of achievements!',
+            'accent' => 'rose',
+            'user_id' => (int)$bday['user_id'],
+            'profile_pic' => $bday['profile_pic'] ?? '',
+            'is_today' => $isToday
+        ];
+    }
+
+    foreach ($anniversaries as $anni) {
+        $doj = $anni['date_of_joining'] ?? '';
+        $years = max(1, (int)($anni['years_completed'] ?? 1));
+        $isToday = substr($doj, 5, 5) === $todayMd;
+        $badgeText = $isToday ? "🎖️ {$years} Year" . ($years > 1 ? 's' : '') . " Anniversary Today!" : "🌟 {$years} Year" . ($years > 1 ? 's' : '') . " Milestone";
+        $tickerItems[] = [
+            'id' => 'anni-' . $anni['user_id'],
+            'type' => 'anniversary',
+            'icon' => 'award',
+            'badge' => $badgeText,
+            'eyebrow' => 'Work Anniversary',
+            'title' => 'Happy Work Anniversary, ' . $anni['full_name'] . '!',
+            'subtitle' => "{$years} Year" . ($years > 1 ? 's' : '') . " of Excellence & Dedication",
+            'message' => "Thank you for your valuable dedication, consistency, and hard work.",
+            'accent' => 'cyan',
+            'user_id' => (int)$anni['user_id'],
+            'profile_pic' => $anni['profile_pic'] ?? '',
+            'years' => $years,
+            'is_today' => $isToday
+        ];
+    }
+
+    return [
+        'target_date' => $date,
+        'total_items' => count($tickerItems),
+        'top_scorers_count' => count($topScorers),
+        'birthdays_count' => count($birthdays),
+        'anniversaries_count' => count($anniversaries),
+        'top_scorers' => $topScorers,
+        'birthdays' => $birthdays,
+        'anniversaries' => $anniversaries,
+        'ticker_items' => $tickerItems
+    ];
+}
+
 // Controller routing
 try {
     $conn = getDbConnection();
@@ -754,41 +924,59 @@ try {
     $page = isset($_GET['page']) ? max(1, (int)$_GET['page']) : 1;
     $limit = isset($_GET['limit']) ? (strtolower($_GET['limit']) === 'all' ? 'all' : max(1, (int)$_GET['limit'])) : 10;
 
+    $slidersData = getRecognitionData($conn, $date);
+
     $response = [
         'ok' => true,
         'action' => $action,
         'query_date' => $date,
         'generated_at' => (new DateTimeImmutable('now', hrBaseTz()))->format('Y-m-d H:i:s'),
+        'sliders' => $slidersData,
+        'recognition' => $slidersData,
     ];
 
     switch ($action) {
         case 'slide1':
             $response['slide1'] = getSlide1Data($conn, $date);
+            $response['slide1']['sliders'] = $slidersData;
             break;
 
         case 'slide2':
             $response['slide2'] = getSlide2Data($conn, $date, $page, $limit);
+            $response['slide2']['sliders'] = $slidersData;
             break;
 
         case 'slide3':
             $response['slide3'] = getSlide3Data($conn, $date, $interval, $shiftStart, $shiftEnd);
+            $response['slide3']['sliders'] = $slidersData;
             break;
 
         case 'slide4':
             $response['slide4'] = getSlide4Data($conn, $date, $interval, $shiftStart, $shiftEnd);
+            $response['slide4']['sliders'] = $slidersData;
+            break;
+
+        case 'recognition':
+            // Already present in $response['sliders'] and $response['recognition']
             break;
 
         case 'slide5':
             $response['slide5'] = getSlide5Data($conn, $date, $interval, $shiftStart, $shiftEnd);
+            $response['slide5']['sliders'] = $slidersData;
             break;
 
         case 'all':
         default:
             $response['slide1'] = getSlide1Data($conn, $date);
+            $response['slide1']['sliders'] = $slidersData;
             $response['slide2'] = getSlide2Data($conn, $date, $page, $limit);
+            $response['slide2']['sliders'] = $slidersData;
             $response['slide3'] = getSlide3Data($conn, $date, $interval, $shiftStart, $shiftEnd);
+            $response['slide3']['sliders'] = $slidersData;
             $response['slide4'] = getSlide4Data($conn, $date, $interval, $shiftStart, $shiftEnd);
+            $response['slide4']['sliders'] = $slidersData;
             $response['slide5'] = getSlide5Data($conn, $date, $interval, $shiftStart, $shiftEnd);
+            $response['slide5']['sliders'] = $slidersData;
             break;
     }
 
