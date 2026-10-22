@@ -740,51 +740,115 @@ function getSlide5Data(mysqli $conn, string $date, int $intervalMinutes = 10, ?s
 /**
  * Live Recognition & Announcements: Top Leads Scored, Birthdays, Work Anniversaries
  */
-function getRecognitionData(mysqli $conn, string $date): array {
+function getRecognitionData(mysqli $conn, string $date, string $scope = 'daily'): array {
     $todayMd = substr($date, 5, 5);
 
-    // 1. Top Leads Scored (Daily from leads created on $date, fallback to top overall scorers)
-    $dailyTopQuery = "
+    // 1. Today's Target Achievers (Calculated strictly from leads & productivity targets for $date)
+    $yy = (int)date('Y', strtotime($date));
+    $mm = (int)date('m', strtotime($date));
+
+    $agentRoles = ['agent', 'operations_agent', 'email_marketing_agent', 'email_marketing_executive', 'form_filler'];
+    $roleIn = "'" . implode("','", $agentRoles) . "'";
+
+    $agentTargetQuery = "
         SELECT 
             u.id AS user_id,
             u.full_name,
             u.role,
             u.department,
             u.profile_pic,
-            COUNT(l.id) AS generated_leads,
-            SUM(CASE WHEN l.qa_status = 'Qualified' THEN 1 ELSE 0 END) AS qualified_leads
+            COALESCE(pt.daily_target, 0) AS daily_target_points
         FROM users u
-        JOIN leads l ON l.agent_id = u.id
-        WHERE DATE(l.created_at) = '{$date}' AND u.is_active = 1
-        GROUP BY u.id, u.full_name
-        ORDER BY qualified_leads DESC, generated_leads DESC
-        LIMIT 6
+        LEFT JOIN productivity_targets pt ON pt.agent_id = u.id AND pt.year = {$yy} AND pt.month = {$mm}
+        WHERE u.is_active = 1 AND u.role IN ($roleIn)
     ";
-    $rs = $conn->query($dailyTopQuery);
-    $topDaily = $rs ? $rs->fetch_all(MYSQLI_ASSOC) : [];
+    $rsAgents = $conn->query($agentTargetQuery);
+    $allAgents = $rsAgents ? $rsAgents->fetch_all(MYSQLI_ASSOC) : [];
 
-    $overallQuery = "
+    $leadsTodayQuery = "
         SELECT 
-            u.id AS user_id,
-            u.full_name,
-            u.role,
-            u.department,
-            u.profile_pic,
-            COUNT(l.id) AS generated_leads,
-            SUM(CASE WHEN l.qa_status = 'Qualified' THEN 1 ELSE 0 END) AS qualified_leads
-        FROM users u
-        JOIN leads l ON l.agent_id = u.id
-        WHERE u.is_active = 1
-        GROUP BY u.id, u.full_name
-        ORDER BY qualified_leads DESC, generated_leads DESC
-        LIMIT 6
+            l.agent_id,
+            l.qa_status,
+            d.campaign_type
+        FROM leads l
+        LEFT JOIN campaign_details d ON d.campaign_id = l.campaign_id
+        WHERE DATE(l.created_at) = '{$date}'
     ";
-    $rsAll = $conn->query($overallQuery);
-    $topOverall = $rsAll ? $rsAll->fetch_all(MYSQLI_ASSOC) : [];
+    $rsLeads = $conn->query($leadsTodayQuery);
+    $agentTodayStats = [];
+    if ($rsLeads) {
+        while ($lr = $rsLeads->fetch_assoc()) {
+            $aid = (int)$lr['agent_id'];
+            if (!isset($agentTodayStats[$aid])) {
+                $agentTodayStats[$aid] = [
+                    'generated' => 0,
+                    'qualified' => 0,
+                    'achieved_points' => 0.0
+                ];
+            }
+            $agentTodayStats[$aid]['generated']++;
+            if ((string)($lr['qa_status'] ?? '') === 'Qualified') {
+                $agentTodayStats[$aid]['qualified']++;
+                $ct = function_exists('normalizeProductivityCampaignType')
+                    ? normalizeProductivityCampaignType((string)($lr['campaign_type'] ?? ''))
+                    : (string)($lr['campaign_type'] ?? '');
+                $factor = function_exists('campaignTypeMqlFactor') ? campaignTypeMqlFactor($ct) : 1.0;
+                if ($factor <= 0) $factor = 1.0;
+                $agentTodayStats[$aid]['achieved_points'] += $factor;
+            }
+        }
+    }
 
-    $topScorers = (!empty($topDaily) && (int)($topDaily[0]['qualified_leads'] ?? 0) > 0) ? $topDaily : $topOverall;
+    $scoredAgents = [];
+    foreach ($allAgents as $ag) {
+        $aid = (int)$ag['user_id'];
+        $stats = $agentTodayStats[$aid] ?? ['generated' => 0, 'qualified' => 0, 'achieved_points' => 0.0];
+        $dailyTarget = (float)$ag['daily_target_points'];
+        $achievedPts = round((float)$stats['achieved_points'], 2);
+        $gen = (int)$stats['generated'];
+        $qual = (int)$stats['qualified'];
 
-    // 2. Birthdays (Active employees celebrating birthday today or recently/upcoming)
+        if ($gen > 0 || $achievedPts > 0) {
+            $compRate = $dailyTarget > 0 ? round(($achievedPts / $dailyTarget) * 100, 1) : ($achievedPts > 0 ? 100.0 : 0.0);
+            $targetMet = ($dailyTarget > 0 && $achievedPts >= $dailyTarget) || ($dailyTarget == 0 && $achievedPts > 0);
+
+            $scoredAgents[] = [
+                'user_id' => $aid,
+                'full_name' => $ag['full_name'],
+                'role' => $ag['role'],
+                'department' => $ag['department'],
+                'profile_pic' => $ag['profile_pic'],
+                'daily_target' => $dailyTarget,
+                'achieved_points' => $achievedPts,
+                'generated_leads' => $gen,
+                'qualified_leads' => $qual,
+                'completion_percentage' => $compRate,
+                'is_target_met' => $targetMet
+            ];
+        }
+    }
+
+    usort($scoredAgents, function ($a, $b) {
+        if ($a['is_target_met'] !== $b['is_target_met']) {
+            return $a['is_target_met'] ? -1 : 1;
+        }
+        if ($a['completion_percentage'] != $b['completion_percentage']) {
+            return ($a['completion_percentage'] > $b['completion_percentage']) ? -1 : 1;
+        }
+        return ($a['achieved_points'] > $b['achieved_points']) ? -1 : 1;
+    });
+
+    $topScorers = array_slice($scoredAgents, 0, 6);
+
+    // 2. Birthdays (Daily basis: only birthdays occurring today; weekly: next 7 days; monthly: this month)
+    $bdayWhereScope = "AND DATE_FORMAT(COALESCE(upd.date_of_birth, u.date_of_birth), '%m-%d') = '{$todayMd}'";
+    if ($scope === 'weekly') {
+        $bdayWhereScope = "AND (DATE_FORMAT(COALESCE(upd.date_of_birth, u.date_of_birth), '%m-%d') BETWEEN '{$todayMd}' AND DATE_FORMAT(DATE_ADD('{$date}', INTERVAL 7 DAY), '%m-%d'))";
+    } elseif ($scope === 'monthly') {
+        $month = substr($date, 5, 2);
+        $bdayWhereScope = "AND DATE_FORMAT(COALESCE(upd.date_of_birth, u.date_of_birth), '%m') = '{$month}'";
+    }
+
     $bdayQuery = "
         SELECT 
             u.id AS user_id,
@@ -797,6 +861,7 @@ function getRecognitionData(mysqli $conn, string $date): array {
         LEFT JOIN user_personal_details upd ON upd.user_id = u.id
         WHERE u.is_active = 1 
           AND (upd.date_of_birth IS NOT NULL OR u.date_of_birth IS NOT NULL)
+          {$bdayWhereScope}
         ORDER BY 
             (DATE_FORMAT(COALESCE(upd.date_of_birth, u.date_of_birth), '%m-%d') = '{$todayMd}') DESC,
             DATE_FORMAT(COALESCE(upd.date_of_birth, u.date_of_birth), '%m-%d') ASC
@@ -805,7 +870,15 @@ function getRecognitionData(mysqli $conn, string $date): array {
     $rsBday = $conn->query($bdayQuery);
     $birthdays = $rsBday ? $rsBday->fetch_all(MYSQLI_ASSOC) : [];
 
-    // 3. Work Anniversaries (Active employees celebrating work anniversary)
+    // 3. Work Anniversaries (Daily basis: only anniversaries occurring today; weekly: next 7 days; monthly: this month)
+    $anniWhereScope = "AND DATE_FORMAT(u.date_of_joining, '%m-%d') = '{$todayMd}'";
+    if ($scope === 'weekly') {
+        $anniWhereScope = "AND (DATE_FORMAT(u.date_of_joining, '%m-%d') BETWEEN '{$todayMd}' AND DATE_FORMAT(DATE_ADD('{$date}', INTERVAL 7 DAY), '%m-%d'))";
+    } elseif ($scope === 'monthly') {
+        $month = substr($date, 5, 2);
+        $anniWhereScope = "AND DATE_FORMAT(u.date_of_joining, '%m') = '{$month}'";
+    }
+
     $anniQuery = "
         SELECT 
             u.id AS user_id,
@@ -819,6 +892,7 @@ function getRecognitionData(mysqli $conn, string $date): array {
         WHERE u.is_active = 1 
           AND u.date_of_joining IS NOT NULL
           AND u.date_of_joining <= '{$date}'
+          {$anniWhereScope}
         ORDER BY 
             (DATE_FORMAT(u.date_of_joining, '%m-%d') = '{$todayMd}') DESC,
             years_completed DESC
@@ -833,21 +907,39 @@ function getRecognitionData(mysqli $conn, string $date): array {
     foreach ($topScorers as $agent) {
         $qual = (int)($agent['qualified_leads'] ?? 0);
         $gen = (int)($agent['generated_leads'] ?? 0);
+        $achievedPts = (float)$agent['achieved_points'];
+        $targetPts = (float)$agent['daily_target'];
+        $compRate = (float)$agent['completion_percentage'];
+        $isMet = !empty($agent['is_target_met']);
+
         $medal = $rank === 1 ? '🥇' : ($rank === 2 ? '🥈' : ($rank === 3 ? '🥉' : '⭐'));
+        $badgeText = $isMet
+            ? "{$medal} Target Achiever ({$compRate}%)"
+            : "{$medal} Rank #{$rank} Target Pace ({$compRate}%)";
+
+        $eyebrow = $isMet ? "Today's Target Achiever" : "Today's Target Pace";
+        $subtitle = $targetPts > 0
+            ? "{$achievedPts} / {$targetPts} Pts Achieved • {$qual} Qualified Leads Today"
+            : "{$achievedPts} Points Achieved • {$qual} Qualified Leads Today";
+
         $tickerItems[] = [
-            'id' => 'lead-rank-' . $agent['user_id'],
+            'id' => 'target-achiever-' . $agent['user_id'],
             'type' => 'top_lead_scorer',
             'icon' => 'trophy',
-            'badge' => "{$medal} Rank #{$rank} Top Scorer",
-            'eyebrow' => 'Top Leads Scored',
+            'badge' => $badgeText,
+            'eyebrow' => $eyebrow,
             'title' => $agent['full_name'],
-            'subtitle' => "{$qual} Qualified Leads • {$gen} Total Generated",
-            'message' => "High productivity milestone & quality qualification turnaround.",
-            'accent' => 'amber',
+            'subtitle' => $subtitle,
+            'message' => $isMet 
+                ? "Daily quota target successfully achieved today! Outstanding execution."
+                : "Leading today's productivity race with {$achievedPts} verified points.",
+            'accent' => $isMet ? 'emerald' : 'amber',
             'user_id' => (int)$agent['user_id'],
             'profile_pic' => $agent['profile_pic'] ?? '',
-            'score' => $qual,
-            'rank' => $rank
+            'score' => $achievedPts,
+            'rank' => $rank,
+            'completion_percentage' => $compRate,
+            'is_target_met' => $isMet
         ];
         $rank++;
     }
@@ -924,7 +1016,11 @@ try {
     $page = isset($_GET['page']) ? max(1, (int)$_GET['page']) : 1;
     $limit = isset($_GET['limit']) ? (strtolower($_GET['limit']) === 'all' ? 'all' : max(1, (int)$_GET['limit'])) : 10;
 
-    $slidersData = getRecognitionData($conn, $date);
+        $scope = isset($_GET['scope']) && in_array(strtolower(trim((string)$_GET['scope'])), ['daily', 'weekly', 'monthly'], true)
+        ? strtolower(trim((string)$_GET['scope']))
+        : 'daily';
+
+    $slidersData = getRecognitionData($conn, $date, $scope);
 
     $response = [
         'ok' => true,
