@@ -322,6 +322,7 @@ function getSlide2Data(mysqli $conn, string $date, int $page = 1, $limit = 10): 
             SELECT 
                 l.agent_id,
                 l.qa_status,
+                l.form_done,
                 d.campaign_type
             FROM leads l
             LEFT JOIN campaign_details d ON d.campaign_id = l.campaign_id
@@ -341,10 +342,16 @@ function getSlide2Data(mysqli $conn, string $date, int $page = 1, $limit = 10): 
                         'qualified' => 0,
                         'disqualified' => 0,
                         'pending_qa' => 0,
+                        'forms_submitted' => 0,
                         'achieved_points' => 0.0
                     ];
                 }
                 $agentLeads[$aid]['generated']++;
+
+                $fd = strtolower(trim((string)($lr['form_done'] ?? 'no')));
+                if ($fd === 'yes' || $fd === '1' || $fd === 'true') {
+                    $agentLeads[$aid]['forms_submitted']++;
+                }
 
                 $st = (string)($lr['qa_status'] ?? '');
                 if ($st === 'Qualified') {
@@ -372,6 +379,7 @@ function getSlide2Data(mysqli $conn, string $date, int $page = 1, $limit = 10): 
                 'qualified' => 0,
                 'disqualified' => 0,
                 'pending_qa' => 0,
+                'forms_submitted' => 0,
                 'achieved_points' => 0.0
             ];
 
@@ -393,6 +401,7 @@ function getSlide2Data(mysqli $conn, string $date, int $page = 1, $limit = 10): 
                 'qualified_leads' => (int)$st['qualified'],
                 'disqualified_leads' => (int)$st['disqualified'],
                 'pending_qa' => (int)$st['pending_qa'],
+                'forms_submitted' => (int)($st['forms_submitted'] ?? 0),
                 'achieved_points' => $achievedPoints,
                 'remaining_points' => $remainingPoints,
                 'completion_percentage' => $compRate,
@@ -413,11 +422,15 @@ function getSlide2Data(mysqli $conn, string $date, int $page = 1, $limit = 10): 
 
     $pagedAgents = $isAll ? $agentsList : array_slice($agentsList, $offset, $limitNum);
 
+    $formSubmissionsMeta = function_exists('getFormSubmissionsData') ? getFormSubmissionsData($conn, $date) : ['total_forms_submitted' => 0, 'by_submitter' => []];
+
     return [
         'total_agents' => $totalAgents,
         'page' => $curPage,
         'limit' => $isAll ? 'all' : $limitNum,
         'total_pages' => $totalPages,
+        'total_forms_submitted' => $formSubmissionsMeta['total_forms_submitted'] ?? 0,
+        'forms_submitted_by' => $formSubmissionsMeta['by_submitter'] ?? [],
         'agents' => $pagedAgents
     ];
 }
@@ -429,18 +442,28 @@ function getSlide3Data(mysqli $conn, string $date, int $intervalMinutes = 10, ?s
     [$sStart, $sEnd] = resolveShiftTimes($conn, $shiftStart, $shiftEnd);
     $intervals = generateTimeIntervals($sStart, $sEnd, $intervalMinutes);
 
-    // Find all active QA analysts
     $qaUsers = [];
-    $rs = $conn->query("
-        SELECT id, full_name, email, role 
-        FROM users 
-        WHERE is_active = 1 AND (role LIKE 'qa%' OR role = 'quality_analyst')
-        ORDER BY full_name ASC
+
+    // 1. Gather all actual QA reviewers who performed audits for this date from qa_audit_logs via qa_reviewed_by
+    $stmtExtra = $conn->prepare("
+        SELECT DISTINCT u.id, u.full_name, u.email, u.role
+        FROM qa_audit_logs q
+        JOIN users u ON u.id = q.qa_reviewed_by
+        WHERE DATE(q.reviewed_at) = ? 
+          AND q.qa_reviewed_by IS NOT NULL 
+          AND q.qa_reviewed_by > 0
+          AND (u.department LIKE '%Quality%' OR u.department LIKE '%QA%' OR u.role LIKE 'qa%' OR u.role = 'quality_analyst')
+          AND u.id != 99 
+          AND u.full_name NOT LIKE '%Sagar%'
     ");
-    if ($rs) {
-        while ($r = $rs->fetch_assoc()) {
-            $qaUsers[(int)$r['id']] = [
-                'user_id' => (int)$r['id'],
+    if ($stmtExtra) {
+        $stmtExtra->bind_param('s', $date);
+        $stmtExtra->execute();
+        $resExtra = $stmtExtra->get_result();
+        while ($r = $resExtra->fetch_assoc()) {
+            $uid = (int)$r['id'];
+            $qaUsers[$uid] = [
+                'user_id' => $uid,
                 'full_name' => (string)$r['full_name'],
                 'email' => (string)$r['email'],
                 'total_qualified' => 0,
@@ -448,20 +471,26 @@ function getSlide3Data(mysqli $conn, string $date, int $intervalMinutes = 10, ?s
                 'timeline' => array_fill(0, count($intervals), ['qualified_count' => 0, 'audited_count' => 0])
             ];
         }
+        $stmtExtra->close();
     }
 
-    // Also include any user who reviewed leads today (e.g. leads audited by admin/team lead)
-    $stmtExtra = $conn->prepare("
+    // 2. Also gather actual QA reviewers from leads table where qa_reviewed_by is recorded
+    $stmtLeads = $conn->prepare("
         SELECT DISTINCT u.id, u.full_name, u.email, u.role
-        FROM qa_audit_logs q
-        JOIN users u ON u.id = q.qa_reviewed_by
-        WHERE DATE(q.reviewed_at) = ?
+        FROM leads l
+        JOIN users u ON u.id = l.qa_reviewed_by
+        WHERE (DATE(l.qa_updated_at) = ? OR (l.qa_updated_at IS NULL AND DATE(l.updated_at) = ?))
+          AND l.qa_reviewed_by IS NOT NULL 
+          AND l.qa_reviewed_by > 0
+          AND (u.department LIKE '%Quality%' OR u.department LIKE '%QA%' OR u.role LIKE 'qa%' OR u.role = 'quality_analyst')
+          AND u.id != 99 
+          AND u.full_name NOT LIKE '%Sagar%'
     ");
-    if ($stmtExtra) {
-        $stmtExtra->bind_param('s', $date);
-        $stmtExtra->execute();
-        $resExtra = $stmtExtra->get_result();
-        while ($r = $resExtra->fetch_assoc()) {
+    if ($stmtLeads) {
+        $stmtLeads->bind_param('ss', $date, $date);
+        $stmtLeads->execute();
+        $resLeads = $stmtLeads->get_result();
+        while ($r = $resLeads->fetch_assoc()) {
             $uid = (int)$r['id'];
             if (!isset($qaUsers[$uid])) {
                 $qaUsers[$uid] = [
@@ -474,14 +503,14 @@ function getSlide3Data(mysqli $conn, string $date, int $intervalMinutes = 10, ?s
                 ];
             }
         }
-        $stmtExtra->close();
+        $stmtLeads->close();
     }
 
-    // Query QA audit logs for the selected date
+    // 3. Query QA audit logs for the selected date to populate intervals
     $stmtLogs = $conn->prepare("
         SELECT qa_reviewed_by, qa_status, reviewed_at
         FROM qa_audit_logs
-        WHERE DATE(reviewed_at) = ? AND qa_reviewed_by IS NOT NULL
+        WHERE DATE(reviewed_at) = ? AND qa_reviewed_by IS NOT NULL AND qa_reviewed_by > 0
         ORDER BY reviewed_at ASC
     ");
     if ($stmtLogs) {
@@ -512,6 +541,44 @@ function getSlide3Data(mysqli $conn, string $date, int $intervalMinutes = 10, ?s
         $stmtLogs->close();
     }
 
+    // 4. Also check leads table for any reviews if audit logs had no records for today
+    $totalAuditsFromLogs = array_sum(array_column($qaUsers, 'total_audited'));
+    if ($totalAuditsFromLogs === 0 && !empty($qaUsers)) {
+        $stmtLeadsLogs = $conn->prepare("
+            SELECT qa_reviewed_by, qa_status, COALESCE(qa_updated_at, updated_at) AS reviewed_at
+            FROM leads
+            WHERE (DATE(qa_updated_at) = ? OR (qa_updated_at IS NULL AND DATE(updated_at) = ?))
+              AND qa_reviewed_by IS NOT NULL AND qa_reviewed_by > 0
+            ORDER BY reviewed_at ASC
+        ");
+        if ($stmtLeadsLogs) {
+            $stmtLeadsLogs->bind_param('ss', $date, $date);
+            $stmtLeadsLogs->execute();
+            $resLeadsLogs = $stmtLeadsLogs->get_result();
+            while ($leadRow = $resLeadsLogs->fetch_assoc()) {
+                $revId = (int)$leadRow['qa_reviewed_by'];
+                if (!isset($qaUsers[$revId])) continue;
+
+                $revAt = (string)$leadRow['reviewed_at'];
+                $slotIdx = findSlotIndex($revAt, $intervals);
+
+                $isQual = ($leadRow['qa_status'] === 'Qualified');
+                $qaUsers[$revId]['total_audited']++;
+                if ($isQual) {
+                    $qaUsers[$revId]['total_qualified']++;
+                }
+
+                if ($slotIdx !== null && isset($qaUsers[$revId]['timeline'][$slotIdx])) {
+                    $qaUsers[$revId]['timeline'][$slotIdx]['audited_count']++;
+                    if ($isQual) {
+                        $qaUsers[$revId]['timeline'][$slotIdx]['qualified_count']++;
+                    }
+                }
+            }
+            $stmtLeadsLogs->close();
+        }
+    }
+
     // Flatten timeline array with interval keys for easy rendering
     $formattedQaList = [];
     foreach ($qaUsers as $qa) {
@@ -531,6 +598,16 @@ function getSlide3Data(mysqli $conn, string $date, int $intervalMinutes = 10, ?s
         unset($qa['timeline']);
         $formattedQaList[] = $qa;
     }
+
+    // Filter out any analyst with 0 audits so unnecessary names are omitted
+    $formattedQaList = array_values(array_filter($formattedQaList, function($qa) {
+        if (($qa['total_audited'] ?? 0) <= 0) return false;
+        if (($qa['user_id'] ?? 0) == 99) return false;
+        if (stripos($qa['full_name'] ?? '', 'sagar') !== false) return false;
+        return true;
+    }));
+    // Sort descending by total audited
+    usort($formattedQaList, fn($a, $b) => ($b['total_audited'] ?? 0) <=> ($a['total_audited'] ?? 0));
 
     return [
         'date' => $date,
@@ -638,6 +715,231 @@ function getSlide4Data(mysqli $conn, string $date, int $intervalMinutes = 10, ?s
 }
 
 /**
+ * Fetches form submission metrics: total count, who submitted them, timestamps, and interval timeline.
+ * Cross-references `form_submissions`, `lead_activity`, and `leads` (form_done='Yes').
+ */
+function getFormSubmissionsData(mysqli $conn, string $date, ?array $intervals = null): array {
+    $submissionsByLead = [];
+
+    // 1. Check form_submissions table
+    try {
+        $stmtFs = $conn->prepare("
+            SELECT 
+                fs.id AS submission_id,
+                fs.lead_id,
+                l.lead_id AS lead_reference,
+                fs.campaign_id,
+                c.name AS campaign_name,
+                fs.submitted_by,
+                u.full_name AS submitter_name,
+                u.role AS submitter_role,
+                fs.submitted_at
+            FROM form_submissions fs
+            LEFT JOIN users u ON u.id = fs.submitted_by
+            LEFT JOIN leads l ON l.id = fs.lead_id
+            LEFT JOIN campaigns c ON c.id = fs.campaign_id
+            WHERE DATE(fs.submitted_at) = ?
+            ORDER BY fs.submitted_at ASC
+        ");
+        if ($stmtFs) {
+            $stmtFs->bind_param('s', $date);
+            $stmtFs->execute();
+            $resFs = $stmtFs->get_result();
+            while ($row = $resFs->fetch_assoc()) {
+                $lid = (int)($row['lead_id'] ?? 0);
+                $key = $lid > 0 ? "id_{$lid}" : "sub_{$row['submission_id']}";
+                $submissionsByLead[$key] = [
+                    'lead_db_id' => $lid > 0 ? $lid : null,
+                    'lead_id' => (string)($row['lead_reference'] ?: ($lid > 0 ? (string)$lid : "SUB-{$row['submission_id']}")),
+                    'campaign_id' => isset($row['campaign_id']) ? (int)$row['campaign_id'] : null,
+                    'campaign_name' => (string)($row['campaign_name'] ?? ''),
+                    'submitted_by' => (int)($row['submitted_by'] ?? 0),
+                    'submitter_name' => (string)($row['submitter_name'] ?: 'System / Agent'),
+                    'submitter_role' => (string)($row['submitter_role'] ?: 'agent'),
+                    'form_done' => 'Yes',
+                    'submitted_at' => (string)$row['submitted_at'],
+                    'source' => 'form_submissions'
+                ];
+            }
+            $stmtFs->close();
+        }
+    } catch (Throwable $e) {}
+
+    // 2. Check lead_activity table for form_submission_saved or form_done updates
+    try {
+        $stmtLa = $conn->prepare("
+            SELECT 
+                la.id AS activity_id,
+                la.lead_id,
+                l.lead_id AS lead_reference,
+                l.campaign_id,
+                c.name AS campaign_name,
+                la.actor_id AS submitted_by,
+                u.full_name AS submitter_name,
+                u.role AS submitter_role,
+                la.created_at AS submitted_at,
+                la.action,
+                la.meta_json
+            FROM lead_activity la
+            LEFT JOIN users u ON u.id = la.actor_id
+            LEFT JOIN leads l ON l.id = la.lead_id
+            LEFT JOIN campaigns c ON c.id = l.campaign_id
+            WHERE DATE(la.created_at) = ?
+              AND (
+                  la.action = 'form_submission_saved' 
+                  OR (la.action = 'lead_updated' AND (la.meta_json LIKE '%form_done%' OR la.meta_json LIKE '%form_filled%'))
+              )
+            ORDER BY la.created_at ASC
+        ");
+        if ($stmtLa) {
+            $stmtLa->bind_param('s', $date);
+            $stmtLa->execute();
+            $resLa = $stmtLa->get_result();
+            while ($row = $resLa->fetch_assoc()) {
+                $lid = (int)($row['lead_id'] ?? 0);
+                $key = "id_{$lid}";
+                if (!isset($submissionsByLead[$key])) {
+                    $submissionsByLead[$key] = [
+                        'lead_db_id' => $lid,
+                        'lead_id' => (string)($row['lead_reference'] ?: (string)$lid),
+                        'campaign_id' => isset($row['campaign_id']) ? (int)$row['campaign_id'] : null,
+                        'campaign_name' => (string)($row['campaign_name'] ?? ''),
+                        'submitted_by' => (int)($row['submitted_by'] ?? 0),
+                        'submitter_name' => (string)($row['submitter_name'] ?: 'System / Agent'),
+                        'submitter_role' => (string)($row['submitter_role'] ?: 'agent'),
+                        'form_done' => 'Yes',
+                        'submitted_at' => (string)$row['submitted_at'],
+                        'source' => 'lead_activity'
+                    ];
+                } elseif (!empty($row['submitted_by']) && empty($submissionsByLead[$key]['submitted_by'])) {
+                    $submissionsByLead[$key]['submitted_by'] = (int)$row['submitted_by'];
+                    $submissionsByLead[$key]['submitter_name'] = (string)($row['submitter_name'] ?: $submissionsByLead[$key]['submitter_name']);
+                    $submissionsByLead[$key]['submitter_role'] = (string)($row['submitter_role'] ?: $submissionsByLead[$key]['submitter_role']);
+                }
+            }
+            $stmtLa->close();
+        }
+    } catch (Throwable $e) {}
+
+    // 3. Check leads table for any leads marked form_done = 'Yes' today
+    try {
+        $stmtL = $conn->prepare("
+            SELECT 
+                l.id AS lead_db_id,
+                l.lead_id AS lead_reference,
+                l.campaign_id,
+                c.name AS campaign_name,
+                COALESCE(l.updated_by, l.agent_id) AS submitted_by,
+                COALESCE(u.full_name, l.agent_name) AS submitter_name,
+                u.role AS submitter_role,
+                COALESCE(l.form_filled_time, l.updated_at, l.created_at) AS submitted_at,
+                l.form_done
+            FROM leads l
+            LEFT JOIN users u ON u.id = COALESCE(l.updated_by, l.agent_id)
+            LEFT JOIN campaigns c ON c.id = l.campaign_id
+            WHERE (DATE(l.form_filled_time) = ? OR (l.form_filled_time IS NULL AND DATE(l.created_at) = ?))
+              AND (l.form_done = 'Yes' OR l.form_done = '1' OR LOWER(l.form_done) = 'true')
+            ORDER BY submitted_at ASC
+        ");
+        if ($stmtL) {
+            $stmtL->bind_param('ss', $date, $date);
+            $stmtL->execute();
+            $resL = $stmtL->get_result();
+            while ($row = $resL->fetch_assoc()) {
+                $lid = (int)($row['lead_db_id'] ?? 0);
+                $key = "id_{$lid}";
+                if (!isset($submissionsByLead[$key])) {
+                    $submissionsByLead[$key] = [
+                        'lead_db_id' => $lid,
+                        'lead_id' => (string)($row['lead_reference'] ?: (string)$lid),
+                        'campaign_id' => isset($row['campaign_id']) ? (int)$row['campaign_id'] : null,
+                        'campaign_name' => (string)($row['campaign_name'] ?? ''),
+                        'submitted_by' => (int)($row['submitted_by'] ?? 0),
+                        'submitter_name' => (string)($row['submitter_name'] ?: 'Agent'),
+                        'submitter_role' => (string)($row['submitter_role'] ?: 'agent'),
+                        'form_done' => 'Yes',
+                        'submitted_at' => (string)$row['submitted_at'],
+                        'source' => 'leads'
+                    ];
+                }
+            }
+            $stmtL->close();
+        }
+    } catch (Throwable $e) {}
+
+    // Aggregate by submitter
+    $bySubmitterMap = [];
+    $allSubmissionsList = array_values($submissionsByLead);
+
+    // Slot-based interval timeline if intervals provided
+    $intervalTimeline = [];
+    if (!empty($intervals)) {
+        foreach ($intervals as $slot) {
+            $intervalTimeline[$slot['slot_index']] = [
+                'slot_index' => $slot['slot_index'],
+                'label' => $slot['label'],
+                'start_time' => $slot['start_time'],
+                'end_time' => $slot['end_time'],
+                'forms_submitted' => 0
+            ];
+        }
+    }
+
+    foreach ($allSubmissionsList as $sub) {
+        $subId = (int)$sub['submitted_by'];
+        $subName = $sub['submitter_name'];
+        $subRole = $sub['submitter_role'];
+
+        if (!isset($bySubmitterMap[$subId])) {
+            $bySubmitterMap[$subId] = [
+                'user_id' => $subId > 0 ? $subId : null,
+                'name' => $subName,
+                'role' => $subRole,
+                'forms_submitted_count' => 0,
+                'leads' => []
+            ];
+        }
+
+        $bySubmitterMap[$subId]['forms_submitted_count']++;
+        $bySubmitterMap[$subId]['leads'][] = [
+            'lead_id' => $sub['lead_id'],
+            'lead_db_id' => $sub['lead_db_id'],
+            'campaign_id' => $sub['campaign_id'],
+            'campaign_name' => $sub['campaign_name'],
+            'form_done' => $sub['form_done'],
+            'submitted_at' => $sub['submitted_at'],
+            'source' => $sub['source']
+        ];
+
+        // Slot timeline
+        if (!empty($intervals) && !empty($sub['submitted_at'])) {
+            $slotIdx = findSlotIndex((string)$sub['submitted_at'], $intervals);
+            if ($slotIdx !== null && isset($intervalTimeline[$slotIdx])) {
+                $intervalTimeline[$slotIdx]['forms_submitted']++;
+            }
+        }
+    }
+
+    // Sort submitters descending by count
+    $bySubmitterList = array_values($bySubmitterMap);
+    usort($bySubmitterList, fn($a, $b) => ($b['forms_submitted_count'] ?? 0) <=> ($a['forms_submitted_count'] ?? 0));
+
+    // Sort recent submissions descending by time
+    usort($allSubmissionsList, function($a, $b) {
+        return strcmp((string)($b['submitted_at'] ?? ''), (string)($a['submitted_at'] ?? ''));
+    });
+
+    return [
+        'date' => $date,
+        'total_forms_submitted' => count($allSubmissionsList),
+        'total_submitters' => count($bySubmitterList),
+        'by_submitter' => $bySubmitterList,
+        'recent_submissions' => array_slice($allSubmissionsList, 0, 25),
+        'timeline' => array_values($intervalTimeline)
+    ];
+}
+
+/**
  * Slide 5: Comparative Analytics (Generation vs QA Auditing & Qualification Timeline)
  */
 function getSlide5Data(mysqli $conn, string $date, int $intervalMinutes = 10, ?string $shiftStart = null, ?string $shiftEnd = null): array {
@@ -655,10 +957,12 @@ function getSlide5Data(mysqli $conn, string $date, int $intervalMinutes = 10, ?s
             'leads_audited' => 0,
             'leads_qualified' => 0,
             'leads_disqualified' => 0,
+            'forms_submitted' => 0,
             'pending_backlog_delta' => 0,
             'cumulative_generated' => 0,
             'cumulative_audited' => 0,
-            'cumulative_qualified' => 0
+            'cumulative_qualified' => 0,
+            'cumulative_forms_submitted' => 0
         ];
     }
 
@@ -697,21 +1001,33 @@ function getSlide5Data(mysqli $conn, string $date, int $intervalMinutes = 10, ?s
         $stmtQ->close();
     }
 
-    // 3. Compute running cumulative metrics and lag
+    // 3. Form Submissions counts per interval
+    $formData = getFormSubmissionsData($conn, $date, $intervals);
+    foreach ($formData['timeline'] as $ft) {
+        $sIdx = $ft['slot_index'];
+        if (isset($slotsData[$sIdx])) {
+            $slotsData[$sIdx]['forms_submitted'] = (int)($ft['forms_submitted'] ?? 0);
+        }
+    }
+
+    // 4. Compute running cumulative metrics and lag
     $totGen = 0;
     $totAud = 0;
     $totQual = 0;
     $totDisqual = 0;
+    $totForms = 0;
 
     foreach ($slotsData as &$slot) {
         $totGen += $slot['leads_generated'];
         $totAud += $slot['leads_audited'];
         $totQual += $slot['leads_qualified'];
         $totDisqual += $slot['leads_disqualified'];
+        $totForms += $slot['forms_submitted'];
 
         $slot['cumulative_generated'] = $totGen;
         $slot['cumulative_audited'] = $totAud;
         $slot['cumulative_qualified'] = $totQual;
+        $slot['cumulative_forms_submitted'] = $totForms;
         $slot['pending_backlog_delta'] = $slot['leads_generated'] - $slot['leads_audited'];
     }
     unset($slot);
@@ -729,10 +1045,13 @@ function getSlide5Data(mysqli $conn, string $date, int $intervalMinutes = 10, ?s
             'total_leads_audited' => $totAud,
             'total_leads_qualified' => $totQual,
             'total_leads_disqualified' => $totDisqual,
+            'total_forms_submitted' => (int)($formData['total_forms_submitted'] ?? $totForms),
             'pending_audit_gap' => max(0, $totGen - $totAud),
             'audit_turnaround_rate' => $auditRate,
-            'qualification_approval_rate' => $qualificationRate
+            'qualification_approval_rate' => $qualificationRate,
+            'forms_submitted_by' => $formData['by_submitter'] ?? []
         ],
+        'forms_breakdown' => $formData,
         'comparison_timeline' => array_values($slotsData)
     ];
 }
@@ -769,6 +1088,7 @@ function getRecognitionData(mysqli $conn, string $date, string $scope = 'daily')
         SELECT 
             l.agent_id,
             l.qa_status,
+            l.form_done,
             d.campaign_type
         FROM leads l
         LEFT JOIN campaign_details d ON d.campaign_id = l.campaign_id
@@ -783,10 +1103,17 @@ function getRecognitionData(mysqli $conn, string $date, string $scope = 'daily')
                 $agentTodayStats[$aid] = [
                     'generated' => 0,
                     'qualified' => 0,
+                    'forms_submitted' => 0,
                     'achieved_points' => 0.0
                 ];
             }
             $agentTodayStats[$aid]['generated']++;
+
+            $fd = strtolower(trim((string)($lr['form_done'] ?? 'no')));
+            if ($fd === 'yes' || $fd === '1' || $fd === 'true') {
+                $agentTodayStats[$aid]['forms_submitted']++;
+            }
+
             if ((string)($lr['qa_status'] ?? '') === 'Qualified') {
                 $agentTodayStats[$aid]['qualified']++;
                 $ct = function_exists('normalizeProductivityCampaignType')
@@ -802,13 +1129,14 @@ function getRecognitionData(mysqli $conn, string $date, string $scope = 'daily')
     $scoredAgents = [];
     foreach ($allAgents as $ag) {
         $aid = (int)$ag['user_id'];
-        $stats = $agentTodayStats[$aid] ?? ['generated' => 0, 'qualified' => 0, 'achieved_points' => 0.0];
+        $stats = $agentTodayStats[$aid] ?? ['generated' => 0, 'qualified' => 0, 'forms_submitted' => 0, 'achieved_points' => 0.0];
         $dailyTarget = (float)$ag['daily_target_points'];
         $achievedPts = round((float)$stats['achieved_points'], 2);
         $gen = (int)$stats['generated'];
         $qual = (int)$stats['qualified'];
+        $formsSub = (int)($stats['forms_submitted'] ?? 0);
 
-        if ($gen > 0 || $achievedPts > 0) {
+        if ($gen > 0 || $achievedPts > 0 || $formsSub > 0) {
             $compRate = $dailyTarget > 0 ? round(($achievedPts / $dailyTarget) * 100, 1) : ($achievedPts > 0 ? 100.0 : 0.0);
             $targetMet = ($dailyTarget > 0 && $achievedPts >= $dailyTarget) || ($dailyTarget == 0 && $achievedPts > 0);
 
@@ -822,6 +1150,7 @@ function getRecognitionData(mysqli $conn, string $date, string $scope = 'daily')
                 'achieved_points' => $achievedPts,
                 'generated_leads' => $gen,
                 'qualified_leads' => $qual,
+                'forms_submitted' => $formsSub,
                 'completion_percentage' => $compRate,
                 'is_target_met' => $targetMet
             ];
@@ -986,10 +1315,13 @@ function getRecognitionData(mysqli $conn, string $date, string $scope = 'daily')
         ];
     }
 
+    $formMetaRecognition = function_exists('getFormSubmissionsData') ? getFormSubmissionsData($conn, $date) : ['total_forms_submitted' => 0];
+
     return [
         'target_date' => $date,
         'total_items' => count($tickerItems),
         'top_scorers_count' => count($topScorers),
+        'total_forms_submitted' => (int)($formMetaRecognition['total_forms_submitted'] ?? 0),
         'birthdays_count' => count($birthdays),
         'anniversaries_count' => count($anniversaries),
         'top_scorers' => $topScorers,
@@ -1016,9 +1348,13 @@ try {
     $page = isset($_GET['page']) ? max(1, (int)$_GET['page']) : 1;
     $limit = isset($_GET['limit']) ? (strtolower($_GET['limit']) === 'all' ? 'all' : max(1, (int)$_GET['limit'])) : 10;
 
-        $scope = isset($_GET['scope']) && in_array(strtolower(trim((string)$_GET['scope'])), ['daily', 'weekly', 'monthly'], true)
+    $scope = isset($_GET['scope']) && in_array(strtolower(trim((string)$_GET['scope'])), ['daily', 'weekly', 'monthly'], true)
         ? strtolower(trim((string)$_GET['scope']))
         : 'daily';
+
+    [$sStartMaster, $sEndMaster] = resolveShiftTimes($conn, $shiftStart, $shiftEnd);
+    $intervalsMaster = generateTimeIntervals($sStartMaster, $sEndMaster, $interval);
+    $formSubmissionsData = getFormSubmissionsData($conn, $date, $intervalsMaster);
 
     $slidersData = getRecognitionData($conn, $date, $scope);
 
@@ -1027,6 +1363,7 @@ try {
         'action' => $action,
         'query_date' => $date,
         'generated_at' => (new DateTimeImmutable('now', hrBaseTz()))->format('Y-m-d H:i:s'),
+        'form_submissions' => $formSubmissionsData,
         'sliders' => $slidersData,
         'recognition' => $slidersData,
     ];
@@ -1054,6 +1391,11 @@ try {
 
         case 'recognition':
             // Already present in $response['sliders'] and $response['recognition']
+            break;
+
+        case 'forms':
+        case 'form_submissions':
+            $response['form_submissions'] = $formSubmissionsData;
             break;
 
         case 'slide5':

@@ -269,6 +269,41 @@ try {
                 $qualityStatus = 'pending';
         }
 
+        // Fetch activity timeline from lead_activity
+        $leadActivity = [];
+        if ($leadDbId > 0) {
+            try {
+                $stmtAct = $conn->prepare("
+                    SELECT la.id, la.lead_id, la.actor_id, la.action, la.meta_json, la.created_at,
+                           u.full_name AS actor_name, u.role AS actor_role
+                    FROM lead_activity la
+                    LEFT JOIN users u ON u.id = la.actor_id
+                    WHERE la.lead_id = ?
+                    ORDER BY la.created_at DESC, la.id DESC
+                    LIMIT 50
+                ");
+                if ($stmtAct) {
+                    $stmtAct->bind_param('i', $leadDbId);
+                    $stmtAct->execute();
+                    $actRes = $stmtAct->get_result();
+                    while ($actRow = $actRes->fetch_assoc()) {
+                        $meta = !empty($actRow['meta_json']) ? json_decode((string)$actRow['meta_json'], true) : [];
+                        if (!is_array($meta)) $meta = [];
+                        $leadActivity[] = [
+                            'id' => (int)$actRow['id'],
+                            'action' => (string)$actRow['action'],
+                            'actor_id' => isset($actRow['actor_id']) ? (int)$actRow['actor_id'] : null,
+                            'actor_name' => (string)($actRow['actor_name'] ?: 'System'),
+                            'actor_role' => (string)($actRow['actor_role'] ?: ''),
+                            'created_at' => $actRow['created_at'],
+                            'meta' => $meta
+                        ];
+                    }
+                    $stmtAct->close();
+                }
+            } catch (Throwable $e) {}
+        }
+
         $firstName = (string)($lead['first_name'] ?? '');
         $lastName = (string)($lead['last_name'] ?? '');
         $fullName = trim($firstName . ' ' . $lastName);
@@ -310,6 +345,7 @@ try {
             'recording_url' => $primaryUrl,
             'recordings' => $processedRecordings,
             'form_data' => $formData,
+            'activity' => $leadActivity,
             'created_at' => $lead['created_at'] ?? null,
             'updated_at' => $lead['updated_at'] ?? null,
             'raw_lead_data' => $lead
@@ -518,6 +554,25 @@ try {
 
         $totalPages = $totalLeads > 0 ? (int)ceil($totalLeads / $limit) : 0;
 
+        // Calculate summary metrics for current result set
+        $formsSubmittedCount = 0;
+        $formsPendingCount = 0;
+        $qualifiedCount = 0;
+        $disqualifiedCount = 0;
+        $pendingCount = 0;
+        foreach ($formattedLeads as $fl) {
+            $fd = strtolower(trim((string)($fl['form_done'] ?? 'no')));
+            if ($fd === 'yes' || $fd === '1' || $fd === 'true') {
+                $formsSubmittedCount++;
+            } else {
+                $formsPendingCount++;
+            }
+            $qs = (string)($fl['qa_status'] ?? '');
+            if ($qs === 'Qualified') $qualifiedCount++;
+            elseif ($qs === 'Disqualified') $disqualifiedCount++;
+            else $pendingCount++;
+        }
+
         echo json_encode([
             'status' => 'success',
             'client' => $clientMeta,
@@ -526,6 +581,14 @@ try {
             'page' => $page,
             'limit' => $limit,
             'total_pages' => $totalPages,
+            'summary' => [
+                'total_leads' => $totalLeads,
+                'forms_submitted' => $formsSubmittedCount,
+                'forms_pending' => $formsPendingCount,
+                'qualified_leads' => $qualifiedCount,
+                'disqualified_leads' => $disqualifiedCount,
+                'pending_qa_leads' => $pendingCount
+            ],
             'leads' => $formattedLeads
         ], JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
         exit;
