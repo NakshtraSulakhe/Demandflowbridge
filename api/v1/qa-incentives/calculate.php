@@ -28,10 +28,11 @@ require_once __DIR__ . '/../slides_analytics.php';
 
 try {
     $conn = getDbConnection();
-    
+
     $rawInput = file_get_contents('php://input');
     $bodyData = !empty($rawInput) ? json_decode($rawInput, true) : [];
-    if (!is_array($bodyData)) $bodyData = [];
+    if (!is_array($bodyData))
+        $bodyData = [];
 
     $params = array_merge($_GET, $_POST, $bodyData);
     $data = getQaDailyAuditsData($conn, $params);

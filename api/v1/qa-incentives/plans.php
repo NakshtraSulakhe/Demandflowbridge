@@ -30,29 +30,30 @@ try {
     $method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
     $rawInput = file_get_contents('php://input');
     $bodyData = !empty($rawInput) ? json_decode($rawInput, true) : [];
-    if (!is_array($bodyData)) $bodyData = [];
+    if (!is_array($bodyData))
+        $bodyData = [];
 
     // Helper to format a plan row
-    $formatPlan = function(array $p): array {
+    $formatPlan = function (array $p): array {
         return [
-            'id' => (int)$p['id'],
-            'name' => (string)$p['name'],
-            'qa_user_ids' => !empty($p['qa_user_ids']) ? (is_array($p['qa_user_ids']) ? $p['qa_user_ids'] : json_decode((string)$p['qa_user_ids'], true)) : [],
-            'client_code' => !empty($p['client_code']) ? (string)$p['client_code'] : null,
-            'campaign_ids' => !empty($p['campaign_ids']) ? (is_array($p['campaign_ids']) ? $p['campaign_ids'] : json_decode((string)$p['campaign_ids'], true)) : [],
-            'apply_all_campaigns' => (bool)($p['apply_all_campaigns'] ?? 1),
-            'frequency' => (string)($p['frequency'] ?? 'daily'),
-            'base_target' => (int)($p['base_target'] ?? 50),
-            'base_reward' => (float)($p['base_reward'] ?? 500.00),
-            'tiers' => !empty($p['tiers_json']) ? (is_array($p['tiers_json']) ? $p['tiers_json'] : json_decode((string)$p['tiers_json'], true)) : [],
-            'is_active' => (bool)($p['is_active'] ?? 1),
+            'id' => (int) $p['id'],
+            'name' => (string) $p['name'],
+            'qa_user_ids' => !empty($p['qa_user_ids']) ? (is_array($p['qa_user_ids']) ? $p['qa_user_ids'] : json_decode((string) $p['qa_user_ids'], true)) : [],
+            'client_code' => !empty($p['client_code']) ? (string) $p['client_code'] : null,
+            'campaign_ids' => !empty($p['campaign_ids']) ? (is_array($p['campaign_ids']) ? $p['campaign_ids'] : json_decode((string) $p['campaign_ids'], true)) : [],
+            'apply_all_campaigns' => (bool) ($p['apply_all_campaigns'] ?? 1),
+            'frequency' => (string) ($p['frequency'] ?? 'daily'),
+            'base_target' => (int) ($p['base_target'] ?? 50),
+            'base_reward' => (float) ($p['base_reward'] ?? 500.00),
+            'tiers' => !empty($p['tiers_json']) ? (is_array($p['tiers_json']) ? $p['tiers_json'] : json_decode((string) $p['tiers_json'], true)) : [],
+            'is_active' => (bool) ($p['is_active'] ?? 1),
             'created_at' => $p['created_at'] ?? null,
             'updated_at' => $p['updated_at'] ?? null,
         ];
     };
 
     if ($method === 'GET') {
-        $id = isset($_GET['id']) ? (int)$_GET['id'] : 0;
+        $id = isset($_GET['id']) ? (int) $_GET['id'] : 0;
         if ($id > 0) {
             $stmt = $conn->prepare("SELECT * FROM qa_incentive_plans WHERE id = ? LIMIT 1");
             $stmt->bind_param('i', $id);
@@ -88,7 +89,7 @@ try {
 
     if ($method === 'POST') {
         $data = !empty($bodyData) ? $bodyData : $_POST;
-        $name = trim((string)($data['name'] ?? ''));
+        $name = trim((string) ($data['name'] ?? ''));
         if ($name === '') {
             http_response_code(400);
             echo json_encode(['ok' => false, 'error' => 'Plan name is required'], JSON_PRETTY_PRINT);
@@ -96,23 +97,24 @@ try {
         }
 
         $qaUserIds = isset($data['qa_user_ids']) && is_array($data['qa_user_ids']) ? json_encode(array_values(array_map('intval', $data['qa_user_ids']))) : null;
-        $clientCode = !empty($data['client_code']) ? strtoupper(trim((string)$data['client_code'])) : null;
+        $clientCode = !empty($data['client_code']) ? strtoupper(trim((string) $data['client_code'])) : null;
         $campaignIds = isset($data['campaign_ids']) && is_array($data['campaign_ids']) ? json_encode(array_values(array_map('intval', $data['campaign_ids']))) : null;
-        $applyAll = isset($data['apply_all_campaigns']) ? ((int)$data['apply_all_campaigns'] ? 1 : 0) : 1;
-        $freq = strtolower(trim((string)($data['frequency'] ?? 'daily')));
-        if (!in_array($freq, ['daily', 'monthly'], true)) $freq = 'daily';
-        $baseTarget = max(0, (int)($data['base_target'] ?? 50));
-        $baseReward = max(0.0, (float)($data['base_reward'] ?? 500.00));
-        
+        $applyAll = isset($data['apply_all_campaigns']) ? ((int) $data['apply_all_campaigns'] ? 1 : 0) : 1;
+        $freq = strtolower(trim((string) ($data['frequency'] ?? 'daily')));
+        if (!in_array($freq, ['daily', 'monthly'], true))
+            $freq = 'daily';
+        $baseTarget = max(0, (int) ($data['base_target'] ?? 50));
+        $baseReward = max(0.0, (float) ($data['base_reward'] ?? 500.00));
+
         $tiersJson = null;
         if (!empty($data['tiers'])) {
-            $tiersJson = is_array($data['tiers']) ? json_encode($data['tiers']) : (string)$data['tiers'];
+            $tiersJson = is_array($data['tiers']) ? json_encode($data['tiers']) : (string) $data['tiers'];
         } elseif (!empty($data['tiers_json'])) {
-            $tiersJson = is_array($data['tiers_json']) ? json_encode($data['tiers_json']) : (string)$data['tiers_json'];
+            $tiersJson = is_array($data['tiers_json']) ? json_encode($data['tiers_json']) : (string) $data['tiers_json'];
         }
 
-        $isActive = isset($data['is_active']) ? ((int)$data['is_active'] ? 1 : 0) : 1;
-        $createdBy = isset($data['created_by']) ? (int)$data['created_by'] : null;
+        $isActive = isset($data['is_active']) ? ((int) $data['is_active'] ? 1 : 0) : 1;
+        $createdBy = isset($data['created_by']) ? (int) $data['created_by'] : null;
 
         $stmt = $conn->prepare("
             INSERT INTO qa_incentive_plans 
@@ -147,7 +149,7 @@ try {
     }
 
     if ($method === 'PUT' || $method === 'PATCH') {
-        $id = isset($_GET['id']) ? (int)$_GET['id'] : (int)($bodyData['id'] ?? 0);
+        $id = isset($_GET['id']) ? (int) $_GET['id'] : (int) ($bodyData['id'] ?? 0);
         if ($id <= 0) {
             http_response_code(400);
             echo json_encode(['ok' => false, 'error' => 'Missing plan ID'], JSON_PRETTY_PRINT);
@@ -162,7 +164,7 @@ try {
         if (isset($data['name'])) {
             $updates[] = "name = ?";
             $types .= "s";
-            $params[] = trim((string)$data['name']);
+            $params[] = trim((string) $data['name']);
         }
         if (array_key_exists('qa_user_ids', $data)) {
             $updates[] = "qa_user_ids = ?";
@@ -172,7 +174,7 @@ try {
         if (array_key_exists('client_code', $data)) {
             $updates[] = "client_code = ?";
             $types .= "s";
-            $params[] = !empty($data['client_code']) ? strtoupper(trim((string)$data['client_code'])) : null;
+            $params[] = !empty($data['client_code']) ? strtoupper(trim((string) $data['client_code'])) : null;
         }
         if (array_key_exists('campaign_ids', $data)) {
             $updates[] = "campaign_ids = ?";
@@ -182,7 +184,7 @@ try {
         if (isset($data['apply_all_campaigns'])) {
             $updates[] = "apply_all_campaigns = ?";
             $types .= "i";
-            $params[] = (int)$data['apply_all_campaigns'] ? 1 : 0;
+            $params[] = (int) $data['apply_all_campaigns'] ? 1 : 0;
         }
         if (isset($data['frequency'])) {
             $updates[] = "frequency = ?";
@@ -192,23 +194,23 @@ try {
         if (isset($data['base_target'])) {
             $updates[] = "base_target = ?";
             $types .= "i";
-            $params[] = max(0, (int)$data['base_target']);
+            $params[] = max(0, (int) $data['base_target']);
         }
         if (isset($data['base_reward'])) {
             $updates[] = "base_reward = ?";
             $types .= "d";
-            $params[] = max(0.0, (float)$data['base_reward']);
+            $params[] = max(0.0, (float) $data['base_reward']);
         }
         if (array_key_exists('tiers', $data) || array_key_exists('tiers_json', $data)) {
             $rawTiers = $data['tiers'] ?? $data['tiers_json'];
             $updates[] = "tiers_json = ?";
             $types .= "s";
-            $params[] = is_array($rawTiers) ? json_encode($rawTiers) : (string)$rawTiers;
+            $params[] = is_array($rawTiers) ? json_encode($rawTiers) : (string) $rawTiers;
         }
         if (isset($data['is_active'])) {
             $updates[] = "is_active = ?";
             $types .= "i";
-            $params[] = (int)$data['is_active'] ? 1 : 0;
+            $params[] = (int) $data['is_active'] ? 1 : 0;
         }
 
         if (empty($updates)) {
@@ -244,7 +246,7 @@ try {
     }
 
     if ($method === 'DELETE') {
-        $id = isset($_GET['id']) ? (int)$_GET['id'] : (int)($bodyData['id'] ?? 0);
+        $id = isset($_GET['id']) ? (int) $_GET['id'] : (int) ($bodyData['id'] ?? 0);
         if ($id <= 0) {
             http_response_code(400);
             echo json_encode(['ok' => false, 'error' => 'Missing plan ID'], JSON_PRETTY_PRINT);
