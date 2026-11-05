@@ -940,6 +940,717 @@ function getFormSubmissionsData(mysqli $conn, string $date, ?array $intervals = 
 }
 
 /**
+ * Ensures qa_incentive_plans table exists in MySQL
+ */
+function ensureQaIncentiveSchema(mysqli $conn): void {
+    static $schemaChecked = false;
+    if ($schemaChecked) return;
+
+    $conn->query("
+        CREATE TABLE IF NOT EXISTS `qa_incentive_plans` (
+            `id` INT AUTO_INCREMENT PRIMARY KEY,
+            `name` VARCHAR(255) NOT NULL,
+            `qa_user_ids` TEXT NULL COMMENT 'JSON array of user IDs or null for all',
+            `client_code` VARCHAR(100) NULL COMMENT 'Specific client code or null for all',
+            `campaign_ids` TEXT NULL COMMENT 'JSON array of campaign IDs or null for all',
+            `apply_all_campaigns` TINYINT(1) DEFAULT 1,
+            `frequency` ENUM('daily', 'monthly') DEFAULT 'daily',
+            `base_target` INT NOT NULL DEFAULT 50,
+            `base_reward` DECIMAL(10,2) NOT NULL DEFAULT 500.00,
+            `tiers_json` TEXT NULL COMMENT 'JSON array of tier slabs [{min, max, rate_per_lead}]',
+            `is_active` TINYINT(1) DEFAULT 1,
+            `created_by` INT NULL,
+            `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
+            `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            INDEX `idx_frequency` (`frequency`),
+            INDEX `idx_client_code` (`client_code`),
+            INDEX `idx_is_active` (`is_active`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    ");
+    $schemaChecked = true;
+}
+
+/**
+ * DemandFlow Bridge - Fetches QA Team Members & Their Daily/Monthly Audited Leads Breakdown
+ * 
+ * Used by Slides App & Admin Portal to display QA audit volume and calculate
+ * incentives according to Base Target + Tier Volume Accelerators.
+ */
+function getQaDailyAuditsData(mysqli $conn, array $params = []): array {
+    ensureQaIncentiveSchema($conn);
+
+    $tz = function_exists('hrBaseTz') ? hrBaseTz() : new DateTimeZone('Asia/Kolkata');
+    $now = new DateTimeImmutable('now', $tz);
+    $defaultDate = $now->format('Y-m-d');
+
+    // 1. Resolve Date Range & Frequency
+    $frequency = strtolower(trim((string)($params['frequency'] ?? 'daily')));
+    if (!in_array($frequency, ['daily', 'monthly', 'custom'], true)) {
+        $frequency = 'daily';
+    }
+
+    $dateFrom = '';
+    $dateTo = '';
+
+    if (!empty($params['date_from']) || !empty($params['date_to'])) {
+        $dateFrom = trim((string)($params['date_from'] ?? $defaultDate));
+        $dateTo = trim((string)($params['date_to'] ?? $dateFrom));
+        if ($dateTo < $dateFrom) {
+            $tmp = $dateFrom;
+            $dateFrom = $dateTo;
+            $dateTo = $tmp;
+        }
+        $frequency = 'custom';
+    } elseif ($frequency === 'monthly') {
+        $year = isset($params['year']) ? (int)$params['year'] : (int)$now->format('Y');
+        $month = isset($params['month']) ? (int)$params['month'] : (int)$now->format('n');
+        $dateFrom = sprintf('%04d-%02d-01', $year, $month);
+        $dateTo = (new DateTimeImmutable($dateFrom, $tz))->modify('last day of this month')->format('Y-m-d');
+    } else {
+        $dateReq = trim((string)($params['date'] ?? ''));
+        if ($dateReq !== '' && preg_match('/^\d{4}-\d{2}-\d{2}$/', $dateReq)) {
+            $dateFrom = $dateReq;
+            $dateTo = $dateReq;
+        } else {
+            $dateFrom = $defaultDate;
+            $dateTo = $defaultDate;
+        }
+    }
+
+    $startDt = $dateFrom . ' 00:00:00';
+    $endDt = $dateTo . ' 23:59:59';
+
+    // 2. Filters
+    $filterQaId = isset($params['qa_id']) ? (int)$params['qa_id'] : (isset($params['user_id']) ? (int)$params['user_id'] : 0);
+    $filterClientCode = strtoupper(trim((string)($params['client_code'] ?? '')));
+    $filterCampaignId = isset($params['campaign_id']) ? (int)$params['campaign_id'] : 0;
+    $filterStatus = trim((string)($params['status'] ?? ''));
+    $includeLeads = !isset($params['include_leads']) || filter_var($params['include_leads'], FILTER_VALIDATE_BOOLEAN);
+
+    // 3. Optional Incentive Plan Configuration / Simulation parameters
+    $baseTarget = isset($params['base_target']) ? max(0, (int)$params['base_target']) : null;
+    $baseReward = isset($params['base_reward']) ? max(0.0, (float)$params['base_reward']) : null;
+    $tiers = [];
+    if (!empty($params['tiers'])) {
+        $rawTiers = is_array($params['tiers']) ? $params['tiers'] : json_decode((string)$params['tiers'], true);
+        if (is_array($rawTiers)) $tiers = $rawTiers;
+    }
+
+    // Check if a saved plan ID was specified
+    $planId = isset($params['plan_id']) ? (int)$params['plan_id'] : 0;
+    $activePlan = null;
+    if ($planId > 0) {
+        $stPlan = $conn->prepare("SELECT * FROM qa_incentive_plans WHERE id = ? LIMIT 1");
+        if ($stPlan) {
+            $stPlan->bind_param('i', $planId);
+            $stPlan->execute();
+            $activePlan = $stPlan->get_result()->fetch_assoc();
+            $stPlan->close();
+        }
+    }
+    if ($activePlan) {
+        if ($baseTarget === null) $baseTarget = (int)($activePlan['base_target'] ?? 50);
+        if ($baseReward === null) $baseReward = (float)($activePlan['base_reward'] ?? 500.0);
+        if (empty($tiers) && !empty($activePlan['tiers_json'])) {
+            $tj = json_decode((string)$activePlan['tiers_json'], true);
+            if (is_array($tj)) $tiers = $tj;
+        }
+    }
+
+    // 4. Gather QA Team Members
+    $qaUsers = [];
+
+    // Query active QA staff from users table
+    $qaUsersQuery = "
+        SELECT id, full_name, email, role, department, job_title, avatar_path, is_active
+        FROM users
+        WHERE (
+            department LIKE '%Quality%' 
+            OR department LIKE '%QA%' 
+            OR role LIKE 'qa%' 
+            OR role = 'quality_analyst'
+            OR role IN ('qa', 'qa_analyst', 'qa_lead', 'qa_manager', 'quality_manager')
+        )
+        AND id != 99 AND full_name NOT LIKE '%Sagar%'
+    ";
+    if ($filterQaId > 0) {
+        $qaUsersQuery .= " AND id = " . $filterQaId;
+    }
+    $qaUsersQuery .= " ORDER BY full_name ASC";
+
+    $resU = $conn->query($qaUsersQuery);
+    if ($resU) {
+        while ($u = $resU->fetch_assoc()) {
+            $uid = (int)$u['id'];
+            $qaUsers[$uid] = [
+                'user_id' => $uid,
+                'qa_id' => $uid,
+                'id' => $uid,
+                'qa_name' => (string)$u['full_name'],
+                'full_name' => (string)$u['full_name'],
+                'name' => (string)$u['full_name'],
+                'email' => (string)$u['email'],
+                'role' => (string)$u['role'],
+                'department' => (string)($u['department'] ?? 'Quality Assurance'),
+                'job_title' => (string)($u['job_title'] ?? 'Quality Analyst'),
+                'avatar' => !empty($u['avatar_path']) ? (string)$u['avatar_path'] : null,
+                'is_active' => (bool)$u['is_active'],
+                'total_audited' => 0,
+                'unique_leads_audited' => 0,
+                'total_audit_actions' => 0,
+                'audited_count' => 0,
+                'qualified_count' => 0,
+                'qualified_leads' => 0,
+                'qualified' => 0,
+                'disqualified_count' => 0,
+                'disqualified_leads' => 0,
+                'disqualified' => 0,
+                'pending_count' => 0,
+                'pending' => 0,
+                'rework_count' => 0,
+                'other_count' => 0,
+                'qualification_rate_pct' => 0.0,
+                'qualification_rate' => 0.0,
+                'disqualification_rate_pct' => 0.0,
+                'status_breakdown' => [],
+                'campaigns_breakdown' => [],
+                'campaigns' => [],
+                'clients_breakdown' => [],
+                'clients' => [],
+                'audited_leads' => [],
+                'leads' => [],
+                '_seen_lead_ids' => [],
+                '_campaign_map' => [],
+                '_client_map' => [],
+            ];
+        }
+    }
+
+    // Also include any users who recorded audits in qa_audit_logs during the period
+    $stmtExtraQ = $conn->prepare("
+        SELECT DISTINCT u.id, u.full_name, u.email, u.role, u.department, u.job_title, u.avatar_path, u.is_active
+        FROM qa_audit_logs q
+        JOIN users u ON u.id = q.qa_reviewed_by
+        WHERE q.reviewed_at BETWEEN ? AND ?
+          AND q.qa_reviewed_by IS NOT NULL AND q.qa_reviewed_by > 0
+          AND u.id != 99 AND u.full_name NOT LIKE '%Sagar%'
+    " . ($filterQaId > 0 ? " AND u.id = " . $filterQaId : ""));
+    if ($stmtExtraQ) {
+        $stmtExtraQ->bind_param('ss', $startDt, $endDt);
+        $stmtExtraQ->execute();
+        $resExtra = $stmtExtraQ->get_result();
+        while ($u = $resExtra->fetch_assoc()) {
+            $uid = (int)$u['id'];
+            if (!isset($qaUsers[$uid])) {
+                $qaUsers[$uid] = [
+                    'user_id' => $uid,
+                    'qa_id' => $uid,
+                    'id' => $uid,
+                    'qa_name' => (string)$u['full_name'],
+                    'full_name' => (string)$u['full_name'],
+                    'name' => (string)$u['full_name'],
+                    'email' => (string)$u['email'],
+                    'role' => (string)$u['role'],
+                    'department' => (string)($u['department'] ?? 'Quality Assurance'),
+                    'job_title' => (string)($u['job_title'] ?? 'Quality Analyst'),
+                    'avatar' => !empty($u['avatar_path']) ? (string)$u['avatar_path'] : null,
+                    'is_active' => (bool)$u['is_active'],
+                    'total_audited' => 0,
+                    'unique_leads_audited' => 0,
+                    'total_audit_actions' => 0,
+                    'audited_count' => 0,
+                    'qualified_count' => 0,
+                    'qualified_leads' => 0,
+                    'qualified' => 0,
+                    'disqualified_count' => 0,
+                    'disqualified_leads' => 0,
+                    'disqualified' => 0,
+                    'pending_count' => 0,
+                    'pending' => 0,
+                    'rework_count' => 0,
+                    'other_count' => 0,
+                    'qualification_rate_pct' => 0.0,
+                    'qualification_rate' => 0.0,
+                    'disqualification_rate_pct' => 0.0,
+                    'status_breakdown' => [],
+                    'campaigns_breakdown' => [],
+                    'campaigns' => [],
+                    'clients_breakdown' => [],
+                    'clients' => [],
+                    'audited_leads' => [],
+                    'leads' => [],
+                    '_seen_lead_ids' => [],
+                    '_campaign_map' => [],
+                    '_client_map' => [],
+                ];
+            }
+        }
+        $stmtExtraQ->close();
+    }
+
+    // 5. Query Audit Logs
+    $auditLogsSql = "
+        SELECT 
+            q.id AS log_id,
+            q.lead_id,
+            l.lead_id AS lead_code,
+            q.prev_status,
+            q.qa_status,
+            q.qa_comment,
+            q.qa_client_comment,
+            q.client_delivery_status,
+            q.qa_reviewed_by,
+            q.reviewed_at,
+            COALESCE(q.campaign_id, l.campaign_id, 0) AS campaign_id,
+            COALESCE(c.name, 'Unassigned Campaign') AS campaign_name,
+            COALESCE(d.code, '') AS campaign_code,
+            COALESCE(NULLIF(TRIM(d.client_code), ''), NULLIF(TRIM(cl.client_code), ''), 'N/A') AS client_code,
+            COALESCE(d.client_id, cl.id, 0) AS client_id,
+            COALESCE(cl.name, d.client_code, 'N/A') AS client_name,
+            l.agent_id,
+            u_agent.full_name AS agent_name
+        FROM qa_audit_logs q
+        LEFT JOIN leads l ON l.id = q.lead_id
+        LEFT JOIN campaigns c ON c.id = COALESCE(q.campaign_id, l.campaign_id)
+        LEFT JOIN campaign_details d ON d.campaign_id = c.id
+        LEFT JOIN clients cl ON cl.id = d.client_id
+        LEFT JOIN users u_agent ON u_agent.id = l.agent_id
+        WHERE q.reviewed_at BETWEEN ? AND ?
+          AND q.qa_reviewed_by IS NOT NULL 
+          AND q.qa_reviewed_by > 0
+    ";
+    $logParams = [$startDt, $endDt];
+    $logTypes = "ss";
+
+    if ($filterQaId > 0) {
+        $auditLogsSql .= " AND q.qa_reviewed_by = ?";
+        $logParams[] = $filterQaId;
+        $logTypes .= "i";
+    }
+    if ($filterCampaignId > 0) {
+        $auditLogsSql .= " AND COALESCE(q.campaign_id, l.campaign_id) = ?";
+        $logParams[] = $filterCampaignId;
+        $logTypes .= "i";
+    }
+    if ($filterClientCode !== '') {
+        $auditLogsSql .= " AND (UPPER(d.client_code) = ? OR UPPER(cl.client_code) = ?)";
+        $logParams[] = $filterClientCode;
+        $logParams[] = $filterClientCode;
+        $logTypes .= "ss";
+    }
+    if ($filterStatus !== '') {
+        $auditLogsSql .= " AND LOWER(q.qa_status) = LOWER(?)";
+        $logParams[] = $filterStatus;
+        $logTypes .= "s";
+    }
+
+    $auditLogsSql .= " ORDER BY q.reviewed_at DESC, q.id DESC";
+
+    $auditRows = [];
+    $stmtLogs = $conn->prepare($auditLogsSql);
+    if ($stmtLogs) {
+        if (function_exists('mysqliBindParams')) {
+            mysqliBindParams($stmtLogs, $logTypes, $logParams);
+        } else {
+            $stmtLogs->bind_param($logTypes, ...$logParams);
+        }
+        $stmtLogs->execute();
+        $resLogs = $stmtLogs->get_result();
+        while ($row = $resLogs->fetch_assoc()) {
+            $auditRows[] = $row;
+        }
+        $stmtLogs->close();
+    }
+
+    // Fallback to leads table if audit logs had no rows for this range
+    if (empty($auditRows)) {
+        $leadsAuditSql = "
+            SELECT 
+                l.id AS log_id,
+                l.id AS lead_id,
+                l.lead_id AS lead_code,
+                NULL AS prev_status,
+                l.qa_status,
+                l.qa_comment,
+                l.qa_client_comment,
+                l.client_delivery_status,
+                l.qa_reviewed_by,
+                COALESCE(l.qa_updated_at, l.updated_at) AS reviewed_at,
+                COALESCE(l.campaign_id, 0) AS campaign_id,
+                COALESCE(c.name, 'Unassigned Campaign') AS campaign_name,
+                COALESCE(d.code, '') AS campaign_code,
+                COALESCE(NULLIF(TRIM(d.client_code), ''), NULLIF(TRIM(cl.client_code), ''), 'N/A') AS client_code,
+                COALESCE(d.client_id, cl.id, 0) AS client_id,
+                COALESCE(cl.name, d.client_code, 'N/A') AS client_name,
+                l.agent_id,
+                u_agent.full_name AS agent_name
+            FROM leads l
+            LEFT JOIN campaigns c ON c.id = l.campaign_id
+            LEFT JOIN campaign_details d ON d.campaign_id = c.id
+            LEFT JOIN clients cl ON cl.id = d.client_id
+            LEFT JOIN users u_agent ON u_agent.id = l.agent_id
+            WHERE (l.qa_updated_at BETWEEN ? AND ? OR (l.qa_updated_at IS NULL AND l.updated_at BETWEEN ? AND ?))
+              AND l.qa_reviewed_by IS NOT NULL 
+              AND l.qa_reviewed_by > 0
+        ";
+        $leadAuditParams = [$startDt, $endDt, $startDt, $endDt];
+        $leadAuditTypes = "ssss";
+
+        if ($filterQaId > 0) {
+            $leadsAuditSql .= " AND l.qa_reviewed_by = ?";
+            $leadAuditParams[] = $filterQaId;
+            $leadAuditTypes .= "i";
+        }
+        if ($filterCampaignId > 0) {
+            $leadsAuditSql .= " AND l.campaign_id = ?";
+            $leadAuditParams[] = $filterCampaignId;
+            $leadAuditTypes .= "i";
+        }
+        if ($filterClientCode !== '') {
+            $leadsAuditSql .= " AND (UPPER(d.client_code) = ? OR UPPER(cl.client_code) = ?)";
+            $leadAuditParams[] = $filterClientCode;
+            $leadAuditParams[] = $filterClientCode;
+            $leadAuditTypes .= "ss";
+        }
+        if ($filterStatus !== '') {
+            $leadsAuditSql .= " AND LOWER(l.qa_status) = LOWER(?)";
+            $leadAuditParams[] = $filterStatus;
+            $leadAuditTypes .= "s";
+        }
+
+        $leadsAuditSql .= " ORDER BY reviewed_at DESC, l.id DESC";
+
+        $stmtLA = $conn->prepare($leadsAuditSql);
+        if ($stmtLA) {
+            if (function_exists('mysqliBindParams')) {
+                mysqliBindParams($stmtLA, $leadAuditTypes, $leadAuditParams);
+            } else {
+                $stmtLA->bind_param($leadAuditTypes, ...$leadAuditParams);
+            }
+            $stmtLA->execute();
+            $resLA = $stmtLA->get_result();
+            while ($row = $resLA->fetch_assoc()) {
+                $auditRows[] = $row;
+            }
+            $stmtLA->close();
+        }
+    }
+
+    // 6. Aggregate Audit Data per QA Analyst
+    $totalTeamAudits = 0;
+    $totalTeamQualified = 0;
+    $totalTeamDisqualified = 0;
+    $statusTotals = [];
+
+    foreach ($auditRows as $row) {
+        $revId = (int)$row['qa_reviewed_by'];
+        if ($revId <= 0) continue;
+
+        if (!isset($qaUsers[$revId])) {
+            $qaUsers[$revId] = [
+                'user_id' => $revId,
+                'qa_id' => $revId,
+                'id' => $revId,
+                'qa_name' => "QA Analyst #{$revId}",
+                'full_name' => "QA Analyst #{$revId}",
+                'name' => "QA Analyst #{$revId}",
+                'email' => '',
+                'role' => 'quality_analyst',
+                'department' => 'Quality Assurance',
+                'job_title' => 'Quality Analyst',
+                'avatar' => null,
+                'is_active' => true,
+                'total_audited' => 0,
+                'unique_leads_audited' => 0,
+                'total_audit_actions' => 0,
+                'audited_count' => 0,
+                'qualified_count' => 0,
+                'qualified_leads' => 0,
+                'qualified' => 0,
+                'disqualified_count' => 0,
+                'disqualified_leads' => 0,
+                'disqualified' => 0,
+                'pending_count' => 0,
+                'pending' => 0,
+                'rework_count' => 0,
+                'other_count' => 0,
+                'qualification_rate_pct' => 0.0,
+                'qualification_rate' => 0.0,
+                'disqualification_rate_pct' => 0.0,
+                'status_breakdown' => [],
+                'campaigns_breakdown' => [],
+                'campaigns' => [],
+                'clients_breakdown' => [],
+                'clients' => [],
+                'audited_leads' => [],
+                'leads' => [],
+                '_seen_lead_ids' => [],
+                '_campaign_map' => [],
+                '_client_map' => [],
+            ];
+        }
+
+        $rawStatus = (string)($row['qa_status'] ?? 'Pending');
+        $normStatus = function_exists('normalizeQaStatus') ? normalizeQaStatus($rawStatus) : ucfirst(strtolower($rawStatus));
+        if ($normStatus === '') $normStatus = 'Pending';
+
+        $leadNumericId = (int)($row['lead_id'] ?? 0);
+        $qaUsers[$revId]['total_audit_actions']++;
+
+        $isNewUniqueLead = !isset($qaUsers[$revId]['_seen_lead_ids'][$leadNumericId]);
+        if ($isNewUniqueLead) {
+            $qaUsers[$revId]['_seen_lead_ids'][$leadNumericId] = true;
+            $qaUsers[$revId]['unique_leads_audited']++;
+            $qaUsers[$revId]['total_audited']++;
+            $qaUsers[$revId]['audited_count']++;
+        }
+
+        if (!isset($qaUsers[$revId]['status_breakdown'][$normStatus])) {
+            $qaUsers[$revId]['status_breakdown'][$normStatus] = 0;
+        }
+        $qaUsers[$revId]['status_breakdown'][$normStatus]++;
+
+        if (!isset($statusTotals[$normStatus])) {
+            $statusTotals[$normStatus] = 0;
+        }
+        $statusTotals[$normStatus]++;
+
+        $statusLower = strtolower($normStatus);
+        if ($statusLower === 'qualified') {
+            $qaUsers[$revId]['qualified_count']++;
+            $qaUsers[$revId]['qualified_leads']++;
+            $qaUsers[$revId]['qualified']++;
+            $totalTeamQualified++;
+        } elseif ($statusLower === 'disqualified') {
+            $qaUsers[$revId]['disqualified_count']++;
+            $qaUsers[$revId]['disqualified_leads']++;
+            $qaUsers[$revId]['disqualified']++;
+            $totalTeamDisqualified++;
+        } elseif (in_array($statusLower, ['pending', 'in review', 'under review'], true)) {
+            $qaUsers[$revId]['pending_count']++;
+            $qaUsers[$revId]['pending']++;
+        } elseif (in_array($statusLower, ['rework needed', 'rework', 'correction needed'], true)) {
+            $qaUsers[$revId]['rework_count']++;
+        } else {
+            $qaUsers[$revId]['other_count']++;
+        }
+
+        $totalTeamAudits++;
+
+        // Campaign breakdown
+        $campId = (int)$row['campaign_id'];
+        $campCode = (string)($row['campaign_code'] ?? '');
+        $campName = (string)($row['campaign_name'] ?? '');
+        $clientCode = (string)($row['client_code'] ?? 'N/A');
+
+        if (!isset($qaUsers[$revId]['_campaign_map'][$campId])) {
+            $qaUsers[$revId]['_campaign_map'][$campId] = [
+                'campaign_id' => $campId,
+                'campaign_name' => $campName,
+                'campaign_code' => $campCode,
+                'client_code' => $clientCode,
+                'total_audited' => 0,
+                'qualified' => 0,
+                'disqualified' => 0,
+                'status_breakdown' => [],
+            ];
+        }
+        $qaUsers[$revId]['_campaign_map'][$campId]['total_audited']++;
+        if ($statusLower === 'qualified') $qaUsers[$revId]['_campaign_map'][$campId]['qualified']++;
+        if ($statusLower === 'disqualified') $qaUsers[$revId]['_campaign_map'][$campId]['disqualified']++;
+        if (!isset($qaUsers[$revId]['_campaign_map'][$campId]['status_breakdown'][$normStatus])) {
+            $qaUsers[$revId]['_campaign_map'][$campId]['status_breakdown'][$normStatus] = 0;
+        }
+        $qaUsers[$revId]['_campaign_map'][$campId]['status_breakdown'][$normStatus]++;
+
+        // Client breakdown
+        if (!isset($qaUsers[$revId]['_client_map'][$clientCode])) {
+            $qaUsers[$revId]['_client_map'][$clientCode] = [
+                'client_code' => $clientCode,
+                'client_id' => (int)($row['client_id'] ?? 0),
+                'client_name' => (string)($row['client_name'] ?? $clientCode),
+                'total_audited' => 0,
+                'qualified' => 0,
+                'disqualified' => 0,
+            ];
+        }
+        $qaUsers[$revId]['_client_map'][$clientCode]['total_audited']++;
+        if ($statusLower === 'qualified') $qaUsers[$revId]['_client_map'][$clientCode]['qualified']++;
+        if ($statusLower === 'disqualified') $qaUsers[$revId]['_client_map'][$clientCode]['disqualified']++;
+
+        // Lead detail item
+        if ($includeLeads) {
+            $leadItem = [
+                'lead_id' => $leadNumericId,
+                'lead_code' => (string)($row['lead_code'] ?: ($leadNumericId > 0 ? ('#' . $leadNumericId) : 'N/A')),
+                'campaign_id' => $campId,
+                'campaign_name' => $campName,
+                'campaign_code' => $campCode,
+                'client_code' => $clientCode,
+                'agent_id' => (int)($row['agent_id'] ?? 0),
+                'agent_name' => (string)($row['agent_name'] ?? 'N/A'),
+                'qa_status' => $normStatus,
+                'prev_status' => !empty($row['prev_status']) ? (string)$row['prev_status'] : null,
+                'reviewed_at' => (string)$row['reviewed_at'],
+                'qa_comment' => (string)($row['qa_comment'] ?? ''),
+                'qa_client_comment' => (string)($row['qa_client_comment'] ?? ''),
+                'client_delivery_status' => (string)($row['client_delivery_status'] ?? 'Pending'),
+            ];
+            $qaUsers[$revId]['audited_leads'][] = $leadItem;
+            $qaUsers[$revId]['leads'][] = $leadItem;
+        }
+    }
+
+    // 7. Calculate Rates & Incentive Breakdown for each Analyst
+    $analystsList = [];
+    $activeAuditorsCount = 0;
+    $topPerformer = null;
+    $maxAudited = -1;
+
+    foreach ($qaUsers as $qa) {
+        $tot = (int)$qa['total_audited'];
+        $qual = (int)$qa['qualified_count'];
+        $disqual = (int)$qa['disqualified_count'];
+
+        $qa['qualification_rate_pct'] = $tot > 0 ? round(($qual / $tot) * 100, 1) : 0.0;
+        $qa['qualification_rate'] = $qa['qualification_rate_pct'];
+        $qa['disqualification_rate_pct'] = $tot > 0 ? round(($disqual / $tot) * 100, 1) : 0.0;
+
+        $camps = array_values($qa['_campaign_map']);
+        $cls = array_values($qa['_client_map']);
+
+        $qa['campaigns_breakdown'] = $camps;
+        $qa['campaigns'] = $camps;
+        $qa['clients_breakdown'] = $cls;
+        $qa['clients'] = $cls;
+
+        unset($qa['_seen_lead_ids'], $qa['_campaign_map'], $qa['_client_map']);
+
+        if ($tot > 0) {
+            $activeAuditorsCount++;
+            if ($tot > $maxAudited) {
+                $maxAudited = $tot;
+                $topPerformer = [
+                    'user_id' => $qa['user_id'],
+                    'qa_id' => $qa['user_id'],
+                    'qa_name' => $qa['qa_name'],
+                    'full_name' => $qa['qa_name'],
+                    'total_audited' => $tot,
+                    'qualified' => $qual,
+                    'disqualified' => $disqual,
+                    'qualification_rate_pct' => $qa['qualification_rate_pct']
+                ];
+            }
+        }
+
+        // Incentive Simulation / Calculation Engine
+        if ($baseTarget !== null && $baseTarget > 0 && $baseReward !== null) {
+            $isTargetMet = ($tot >= $baseTarget);
+            $tierBonusTotal = 0.0;
+            $tierBreakdown = [];
+
+            if ($isTargetMet) {
+                $earnedBase = (float)$baseReward;
+                foreach ($tiers as $idx => $tier) {
+                    $min = (int)($tier['min'] ?? ($tier['from'] ?? 0));
+                    $max = isset($tier['max']) ? (int)$tier['max'] : (isset($tier['to']) ? (int)$tier['to'] : null);
+                    $rate = (float)($tier['rate'] ?? ($tier['rate_per_lead'] ?? 0.0));
+
+                    if ($tot >= $min && $rate > 0) {
+                        $leadsInTier = ($max !== null) ? min($tot - $min + 1, $max - $min + 1) : ($tot - $min + 1);
+                        if ($leadsInTier > 0) {
+                            $tierEarned = $leadsInTier * $rate;
+                            $tierBonusTotal += $tierEarned;
+                            $tierBreakdown[] = [
+                                'tier_index' => $idx + 1,
+                                'tier_label' => ($max !== null) ? "Leads {$min}-{$max}" : "Leads {$min}+",
+                                'leads_count' => $leadsInTier,
+                                'rate_per_lead' => $rate,
+                                'tier_bonus' => round($tierEarned, 2),
+                            ];
+                        }
+                    }
+                }
+                $totalIncentive = round($earnedBase + $tierBonusTotal, 2);
+            } else {
+                $earnedBase = 0.0;
+                $totalIncentive = 0.0;
+            }
+
+            $completionPct = $baseTarget > 0 ? round(($tot / $baseTarget) * 100, 1) : 0.0;
+
+            $qa['incentive_calculation'] = [
+                'frequency' => $frequency,
+                'base_target' => $baseTarget,
+                'base_reward' => $baseReward,
+                'target_achieved' => $isTargetMet,
+                'completion_pct' => $completionPct,
+                'base_incentive_earned' => $earnedBase,
+                'tier_bonus_earned' => round($tierBonusTotal, 2),
+                'total_incentive_earned' => $totalIncentive,
+                'tier_breakdown' => $tierBreakdown,
+            ];
+        }
+
+        $analystsList[] = $qa;
+    }
+
+    // Sort descending by total audited, then name
+    usort($analystsList, function($a, $b) {
+        $c = ($b['total_audited'] ?? 0) <=> ($a['total_audited'] ?? 0);
+        if ($c !== 0) return $c;
+        return strcmp($a['qa_name'] ?? '', $b['qa_name'] ?? '');
+    });
+
+    // 8. Overall Summary Block
+    $overallQualRate = $totalTeamAudits > 0 ? round(($totalTeamQualified / $totalTeamAudits) * 100, 1) : 0.0;
+    $overallDisqualRate = $totalTeamAudits > 0 ? round(($totalTeamDisqualified / $totalTeamAudits) * 100, 1) : 0.0;
+
+    $summary = [
+        'frequency' => $frequency,
+        'date' => $dateFrom === $dateTo ? $dateFrom : null,
+        'date_from' => $dateFrom,
+        'date_to' => $dateTo,
+        'total_qa_members' => count($analystsList),
+        'active_qa_auditors' => $activeAuditorsCount,
+        'total_leads_audited' => $totalTeamAudits,
+        'total_audit_actions' => $totalTeamAudits,
+        'total_qualified' => $totalTeamQualified,
+        'total_disqualified' => $totalTeamDisqualified,
+        'overall_qualification_rate_pct' => $overallQualRate,
+        'overall_disqualification_rate_pct' => $overallDisqualRate,
+        'status_totals' => $statusTotals,
+        'top_performer' => $topPerformer,
+    ];
+
+    // Fetch existing active QA incentive plans for reference
+    $plansList = [];
+    $resPlans = $conn->query("SELECT * FROM qa_incentive_plans WHERE is_active = 1 ORDER BY id ASC");
+    if ($resPlans) {
+        while ($pl = $resPlans->fetch_assoc()) {
+            $pl['qa_user_ids'] = !empty($pl['qa_user_ids']) ? json_decode((string)$pl['qa_user_ids'], true) : [];
+            $pl['campaign_ids'] = !empty($pl['campaign_ids']) ? json_decode((string)$pl['campaign_ids'], true) : [];
+            $pl['tiers'] = !empty($pl['tiers_json']) ? json_decode((string)$pl['tiers_json'], true) : [];
+            $plansList[] = $pl;
+        }
+    }
+
+    return [
+        'ok' => true,
+        'action' => 'qa_audits',
+        'frequency' => $frequency,
+        'date' => $dateFrom === $dateTo ? $dateFrom : null,
+        'date_from' => $dateFrom,
+        'date_to' => $dateTo,
+        'summary' => $summary,
+        'total_qa_analysts' => count($analystsList),
+        'qa_analysts' => $analystsList,
+        'qa_users' => $analystsList,
+        'plans' => $plansList,
+    ];
+}
+
+/**
  * Slide 5: Comparative Analytics (Generation vs QA Auditing & Qualification Timeline)
  */
 function getSlide5Data(mysqli $conn, string $date, int $intervalMinutes = 10, ?string $shiftStart = null, ?string $shiftEnd = null): array {
@@ -1358,6 +2069,9 @@ try {
 
     $slidersData = getRecognitionData($conn, $date, $scope);
 
+    $isQaAction = in_array($action, ['qa_audits', 'qa_daily_audits', 'qa_incentives', 'qa_team', 'all'], true);
+    $qaAuditsData = $isQaAction ? getQaDailyAuditsData($conn, $_GET) : null;
+
     $response = [
         'ok' => true,
         'action' => $action,
@@ -1366,6 +2080,7 @@ try {
         'form_submissions' => $formSubmissionsData,
         'sliders' => $slidersData,
         'recognition' => $slidersData,
+        'qa_audits' => $qaAuditsData,
     ];
 
     switch ($action) {
@@ -1398,6 +2113,14 @@ try {
             $response['form_submissions'] = $formSubmissionsData;
             break;
 
+        case 'qa_audits':
+        case 'qa_daily_audits':
+        case 'qa_incentives':
+        case 'qa_team':
+            $response['qa_audits'] = $qaAuditsData ?? getQaDailyAuditsData($conn, $_GET);
+            $response['data'] = $response['qa_audits'];
+            break;
+
         case 'slide5':
             $response['slide5'] = getSlide5Data($conn, $date, $interval, $shiftStart, $shiftEnd);
             $response['slide5']['sliders'] = $slidersData;
@@ -1415,6 +2138,7 @@ try {
             $response['slide4']['sliders'] = $slidersData;
             $response['slide5'] = getSlide5Data($conn, $date, $interval, $shiftStart, $shiftEnd);
             $response['slide5']['sliders'] = $slidersData;
+            $response['qa_audits'] = $qaAuditsData ?? getQaDailyAuditsData($conn, $_GET);
             break;
     }
 
